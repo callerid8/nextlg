@@ -1,6 +1,5 @@
 export interface MtrData {
   Hop: number;
-
   ASN: string;
   Prefix: string;
   Host: string;
@@ -20,6 +19,11 @@ export interface MtrData {
   StDev: number;
   LossPercent: number;
   isHidden: boolean;
+}
+
+interface DnsResponse {
+  Answer?: { name: string; data: string; type: number }[];
+  Status: number;
 }
 
 const LOCALSTORAGE_CACHE_DURATION = 12 * 60 * 60 * 1000;
@@ -144,7 +148,7 @@ export const parseMtrLine = (
   prev: Map<number, MtrData>,
 ): Map<number, MtrData> => {
   const newMap = new Map(prev);
-  console.log(line);
+  //console.log(line);
   const lines = line.split("\n").filter((l) => l.trim());
 
   for (const singleLine of lines) {
@@ -236,3 +240,45 @@ export const parseMtrLine = (
 
   return newMap;
 };
+
+export async function resolveDns(
+  target: string,
+  isIp: boolean,
+): Promise<string | null> {
+  const cacheKey = `${isIp ? "ptr" : "a"}_${target}`;
+  const cachedData = localStorage.getItem(cacheKey);
+
+  if (cachedData) {
+    try {
+      const { value, timestamp } = JSON.parse(cachedData);
+      if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
+        return value;
+      }
+    } catch (error) {
+      console.error("Failed to parse cached DNS data:", error);
+    }
+  }
+
+  try {
+    const type = isIp ? "ptr" : "a";
+    const query = isIp
+      ? target.split(".").reverse().join(".") + ".in-addr.arpa"
+      : target;
+
+    const response = await fetch(`${DNS_API_URL}?name=${query}&type=${type}`);
+    const data: DnsResponse = await response.json();
+
+    if (data.Status === 0 && data.Answer?.[0]) {
+      const result = data.Answer[0].data.replace(/\.$/, "");
+      localStorage.setItem(
+        cacheKey,
+        JSON.stringify({ value: result, timestamp: Date.now() }),
+      );
+      return result;
+    }
+    return null;
+  } catch (error) {
+    console.error("DNS lookup failed:", error);
+    return null;
+  }
+}

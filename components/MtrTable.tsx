@@ -18,6 +18,9 @@ interface DnsResponse {
     Status: number;
 }
 
+const LOCALSTORAGE_CACHE_DURATION = 12 * 60 * 60 * 1000;
+const DNS_API_URL = "https://dns.google/resolve";
+
 // Add helper function for timestamp
 function getFormattedTimestamp() {
     return new Intl.DateTimeFormat('en-US', {
@@ -31,24 +34,44 @@ function getFormattedTimestamp() {
     }).format(new Date()).replace(/(\d+)\/(\d+)\/(\d+)/, '$3-$1-$2');
 }
 
-async function resolveDns(target: string, isIp: boolean): Promise<string | null> {
-    try {
-        const type = isIp ? 'ptr' : 'a';
-        const query = isIp ?
-            target.split('.').reverse().join('.') + '.in-addr.arpa' :
-            target;
+const resolveDns = async (
+    target: string,
+    isIp: boolean,
+): Promise<string | null> => {
+    const cacheKey = `${isIp ? "ptr" : "a"}_${target}`;
+    const cachedData = localStorage.getItem(cacheKey);
 
-        const response = await fetch(
-            `https://dns.google/resolve?name=${query}&type=${type}`
-        );
+    if (cachedData) {
+        try {
+            const { value, timestamp } = JSON.parse(cachedData);
+            if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
+                return value;
+            }
+        } catch (error) {
+            console.error("Failed to parse cached DNS data:", error);
+        }
+    }
+
+    try {
+        const type = isIp ? "ptr" : "a";
+        const query = isIp
+            ? target.split(".").reverse().join(".") + ".in-addr.arpa"
+            : target;
+
+        const response = await fetch(`${DNS_API_URL}?name=${query}&type=${type}`);
         const data: DnsResponse = await response.json();
 
         if (data.Status === 0 && data.Answer?.[0]) {
-            return data.Answer[0].data.replace(/\.$/, '');
+            const result = data.Answer[0].data.replace(/\.$/, "");
+            localStorage.setItem(
+                cacheKey,
+                JSON.stringify({ value: result, timestamp: Date.now() }),
+            );
+            return result;
         }
         return null;
     } catch (error) {
-        console.error('DNS lookup failed:', error);
+        console.error("DNS lookup failed:", error);
         return null;
     }
 }
@@ -104,17 +127,17 @@ export const MtrTable = memo(({ data, sourceInfo, target }: MtrTableProps) => {
                         </TableRow>
                     </>
                 )}
-                <TableRow className="text-sm">
-                    <TableHead>Hop</TableHead>
-                    <TableHead>ASN</TableHead>
-                    <TableHead>Host</TableHead>
-                    <TableHead>Loss%</TableHead>
-                    <TableHead>Snt</TableHead>
-                    <TableHead>Last</TableHead>
-                    <TableHead>Avg</TableHead>
-                    <TableHead>Best</TableHead>
-                    <TableHead>Wrst</TableHead>
-                    <TableHead>StDev</TableHead>
+                <TableRow>
+                    <TableHead className="font-bold">Hop</TableHead>
+                    <TableHead className="font-bold">ASN</TableHead>
+                    <TableHead className="font-bold">Host</TableHead>
+                    <TableHead className="font-bold">Loss%</TableHead>
+                    <TableHead className="font-bold">Snt</TableHead>
+                    <TableHead className="font-bold">Last</TableHead>
+                    <TableHead className="font-bold">Avg</TableHead>
+                    <TableHead className="font-bold">Best</TableHead>
+                    <TableHead className="font-bold">Wrst</TableHead>
+                    <TableHead className="font-bold">StDev</TableHead>
                 </TableRow>
             </TableHeader>
             <TooltipProvider>

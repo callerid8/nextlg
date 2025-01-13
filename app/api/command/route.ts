@@ -43,8 +43,6 @@ export async function POST(req: Request) {
   if (!targetHost || !command || !ALLOWED_COMMANDS.has(command)) {
     return new Response("Invalid target host or command", { status: 400 });
   }
-
-  // Special handling for livemtr to get system info first
   
   // Handle other commands
   const options = COMMAND_OPTIONS[command as keyof typeof COMMAND_OPTIONS];

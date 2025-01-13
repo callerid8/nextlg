@@ -1,4 +1,5 @@
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+const REQUEST_TIMEOUT = 30000; // 30 seconds
 
 const HTTP_HEADERS = {
   JSON: { "Content-Type": "application/json" },
@@ -10,24 +11,21 @@ const HTTP_HEADERS = {
   },
 } as const;
 
-type Params = Promise<{ id: string }>;
+//type Params = Promise<{ id: string }>;
 
-function createChunk(idNumber: number, chunkSize: number): Uint8Array {
+function createChunk(chunkSize: number): Uint8Array {
   if (chunkSize <= 0 || chunkSize % 4 !== 0) {
     throw new Error("Chunk size must be a positive multiple of 4");
   }
 
-  // Create a single pattern to reuse
-  const pattern = new Uint32Array(1);
   const result = new Uint8Array(chunkSize);
-  const view = new DataView(result.buffer);
+  const maxCryptoSize = 65536; // Max size for crypto.getRandomValues
 
-  // Pre-calculate the first part of the pattern
-  const basePattern = (idNumber & 0xffff) << 16;
-
-  for (let i = 0; i < chunkSize; i += 4) {
-    pattern[0] = basePattern | (i & 0xffff);
-    view.setUint32(i, pattern[0], true);
+  for (let offset = 0; offset < chunkSize; offset += maxCryptoSize) {
+    const length = Math.min(maxCryptoSize, chunkSize - offset);
+    const tempBuffer = new Uint8Array(length);
+    crypto.getRandomValues(tempBuffer);
+    result.set(tempBuffer, offset);
   }
 
   return result;
@@ -43,28 +41,27 @@ function createErrorResponse(error: unknown, status = 400): Response {
   });
 }
 
-export async function GET(
-  request: Request,
-  { params }: { params: Params },
-): Promise<Response> {
+export async function GET(): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
   try {
-    const { id } = await params;
-    if (!id) throw new Error("ID is missing in request parameters");
+    const chunk = createChunk(CHUNK_SIZE);
+    clearTimeout(timeoutId);
 
-    const idNumber = parseInt(id.split("-")[1] || "0", 10);
-    //console.log("idNumber:", idNumber);
-    if (isNaN(idNumber)) throw new Error(`Invalid ID number: ${id}`);
-
-    const chunk = createChunk(idNumber, CHUNK_SIZE);
     return new Response(chunk, {
-      headers: { ...HTTP_HEADERS.BINARY, ETag: id },
+      headers: HTTP_HEADERS.BINARY,
     });
   } catch (error) {
+    clearTimeout(timeoutId);
     return createErrorResponse(error);
   }
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
   try {
     if (!request.body) throw new Error("Request body is missing");
 
@@ -75,13 +72,26 @@ export async function POST(request: Request): Promise<Response> {
       const { done, value } = await reader.read();
       if (done) break;
       if (value) bytesRead += value.length;
+      if (bytesRead > CHUNK_SIZE * 2) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     }
 
+    clearTimeout(timeoutId);
     return new Response(
       JSON.stringify({ success: true, bytesReceived: bytesRead }),
       { headers: HTTP_HEADERS.JSON },
     );
   } catch (error) {
+    clearTimeout(timeoutId);
+    if (
+      error &&
+      typeof error === "object" &&
+      "name" in error &&
+      error.name === "AbortError"
+    ) {
+      return createErrorResponse("Request timeout", 408);
+    }
     return createErrorResponse(error, 500);
   }
 }
