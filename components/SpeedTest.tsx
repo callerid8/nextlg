@@ -247,7 +247,7 @@ export function Speedtest() {
                 console.error("Upload test error:", err);
             }
         }
-    }, [runTest, uploadChunk, testSize]);
+    }, [runTest, uploadChunk, testSize, createRandomChunks]);
 
     const runSpeedTest = async () => {
         if (timeoutId) clearTimeout(timeoutId);
