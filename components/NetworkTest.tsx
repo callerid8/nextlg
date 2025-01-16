@@ -93,11 +93,11 @@ export function NetworkTest() {
     const ipv6Address = process.env.NEXT_PUBLIC_IPV6_ADDRESS || "";
 
     // Get the file URLs from environment variables
-    const file1Url = process.env.NEXT_PUBLIC_FILE1_URL || "";
+    const file1Url = process.env.NEXT_PUBLIC_FILE1_URL || "/api/download/10mb";
     const file1Size = process.env.NEXT_PUBLIC_FILE1_SIZE || "10MB";
-    const file2Url = process.env.NEXT_PUBLIC_FILE2_URL || "";
+    const file2Url = process.env.NEXT_PUBLIC_FILE2_URL || "/api/download/100mb";
     const file2Size = process.env.NEXT_PUBLIC_FILE2_SIZE || "100MB";
-    const file3Url = process.env.NEXT_PUBLIC_FILE3_URL || "";
+    const file3Url = process.env.NEXT_PUBLIC_FILE3_URL || "/api/download/250mb";
     const file3Size = process.env.NEXT_PUBLIC_FILE3_SIZE || "250MB";
 
     const { control, handleSubmit, formState: { errors } } = useForm<FormValues>({
@@ -108,6 +108,7 @@ export function NetworkTest() {
         resolver: zodResolver(formSchema),
     });
 
+    // Memoize the default MTR row creation
     const createDefaultMtrRow = useCallback((hop: number): MtrData => ({
         Hop: hop,
         ASN: "N/A",
@@ -131,6 +132,7 @@ export function NetworkTest() {
         isHidden: false,
     }), []);
 
+    // Memoize the stats calculation
     const calculateStats = useCallback((pings: number[]) => {
         const validPings = pings.filter((p) => p > 0 && p !== Infinity);
         if (validPings.length === 0) {
@@ -148,6 +150,7 @@ export function NetworkTest() {
         };
     }, []);
 
+    // Memoize the MTR row update
     const updateMtrRow = useCallback((row: MtrData, lastTime: number): void => {
         if (lastTime > 0) {
             row.Pings.push(lastTime);
@@ -163,6 +166,7 @@ export function NetworkTest() {
         }
     }, [calculateStats]);
 
+    // Memoize the loss percentage update
     const updateLossPercentage = useCallback((hop: number): void => {
         setMtrDataMap((prev) => {
             const row = prev.get(hop);
@@ -179,6 +183,7 @@ export function NetworkTest() {
         });
     }, []);
 
+    // Memoize the ASN fetch
     const fetchASN = useCallback(async (reversedHost: string, cacheKey: string, currentRow: MtrData) => {
         try {
             const response = await fetch(`${DNS_API_URL}?name=${reversedHost}.origin.asn.cymru.com&type=txt`);
@@ -197,6 +202,7 @@ export function NetworkTest() {
         }
     }, []);
 
+    // Memoize the MTR line parsing
     const parseMtrLine = useCallback((line: string, prev: Map<number, MtrData>): Map<number, MtrData> => {
         const newMap = new Map(prev);
         const lines = line.split("\n").filter((l) => l.trim());
@@ -291,6 +297,7 @@ export function NetworkTest() {
         return newMap;
     }, [createDefaultMtrRow, updateMtrRow, updateLossPercentage, fetchASN]);
 
+    // Handle streamed response
     const handleStreamedResponse = useCallback(async (response: Response, command: string) => {
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
@@ -306,15 +313,10 @@ export function NetworkTest() {
                 try {
                     if (command.startsWith("livemtr")) {
                         const data = JSON.parse(line);
-                        //console.log(data)
                         if (data.type === "system_info") {
                             setMtrHead(prev => new Map(prev).set(0, { hostname: data.hostname, ips: data.ips }));
-                        }
-                        else if (data.output !== undefined) {
-                            setMtrDataMap(prev => {
-                                const newMap = parseMtrLine(data.output, prev);
-                                return newMap;
-                            });
+                        } else if (data.output !== undefined) {
+                            setMtrDataMap(prev => parseMtrLine(data.output, prev));
                         }
                     } else {
                         const data = JSON.parse(line);
@@ -332,6 +334,7 @@ export function NetworkTest() {
         }
     }, [parseMtrLine]);
 
+    // Handle form submission
     const onSubmit = useCallback(async (values: FormValues) => {
         setOutput("");
         setMtrDataMap(new Map());
@@ -356,6 +359,7 @@ export function NetworkTest() {
         }
     }, [handleStreamedResponse]);
 
+    // Memoize the sorted MTR data
     const sortedMtrData = useMemo(() =>
         [...mtrDataMap.values()].sort((a, b) => a.Hop - b.Hop),
         [mtrDataMap]
@@ -378,20 +382,12 @@ export function NetworkTest() {
                         <span>Test IPv6:</span><span className="font-semibold">{ipv6Address}</span>
                     </p>
                 )}
-                <p className="p-2 space-y-2 space-x-2 text-sm hidden lg:block"><span className="">Test Files:</span>
-
-                    <Link href={`${file1Url !== "" ? file1Url : "/api/download/10mb"}`} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">
-                        {file1Size}
-                    </Link>
-                    <Link href={`${file2Url !== "" ? file2Url : "/api/download/100mb"}`} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">
-                        {file2Size}
-                    </Link>
-                    <Link href={`${file3Url !== "" ? file3Url : "/api/download/250mb"}`} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">
-                        {file3Size}
-                    </Link>
+                <p className="p-2 space-y-2 space-x-2 text-sm hidden lg:block">
+                    <span className="">Test Files:</span>
+                    <Link href={file1Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file1Size}</Link>
+                    <Link href={file2Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file2Size}</Link>
+                    <Link href={file3Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file3Size}</Link>
                 </p>
-
-
             </CardHeader>
             <CardContent className="space-y-4">
                 <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
@@ -411,7 +407,6 @@ export function NetworkTest() {
                                 />
                             )}
                         />
-
                         <Controller
                             name="command"
                             control={control}
@@ -438,7 +433,6 @@ export function NetworkTest() {
                                 </Select>
                             )}
                         />
-
                         <Button
                             type="submit"
                             disabled={isLoading}
@@ -447,7 +441,6 @@ export function NetworkTest() {
                             {isLoading ? <LoadingSpinner /> : 'Run Test'}
                         </Button>
                     </div>
-
                     {errors.targetHost && (
                         <p id="target-host-error" className="mt-1 text-red-500 text-sm">
                             {errors.targetHost.message}
@@ -462,7 +455,6 @@ export function NetworkTest() {
                         <AlertDescription>{error}</AlertDescription>
                     </Alert>
                 )}
-
                 {output && (
                     <div className="w-full">
                         <Textarea
@@ -473,7 +465,6 @@ export function NetworkTest() {
                         />
                     </div>
                 )}
-
                 {sortedMtrData.length > 0 && (
                     <div className="w-full overflow-x-auto">
                         <MtrTable
