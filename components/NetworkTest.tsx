@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useForm, Controller } from "react-hook-form";
 import * as z from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
+import LoadingSpinner from "@/components/LoadingSpinner";
 import { Input } from "@/components/ui/input";
 import {
     Select,
@@ -34,15 +35,9 @@ interface MtrData {
     ASN: string;
     Prefix: string;
     Host: string;
-    Sent: number;
-    SentPacket: number;
     SentPackets: number[];
-    Received: number;
-    ReceivedPacket: number;
     ReceivedPackets: number[];
     Pings: number[];
-    TotalTime: number;
-    VarianceSum: number;
     Last: number;
     Best: number;
     Worst: number;
@@ -72,20 +67,95 @@ const formSchema = z.object({
 
 type FormValues = z.infer<typeof formSchema>;
 
-const LoadingSpinner = () => (
-    <div
-        className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]"
-        role="status"
-        aria-label="Loading"
-    >
-        <span className="sr-only">Loading...</span>
-    </div>
-);
+const handleHostLine = async (
+    currentRow: MtrData,
+    prevRow: MtrData | undefined,
+    host: string,
+    fetchASN: (reversedHost: string, cacheKey: string, currentRow: MtrData) => Promise<void>
+) => {
+    currentRow.Host = host;
+    currentRow.isHidden = host === prevRow?.Host;
+
+    if (!reservedIPv4Regex.test(host)) {
+        const reversedHost = host
+            .split(".")
+            .slice(0, 3)
+            .reverse()
+            .join(".");
+        const cacheKey = `asn_${reversedHost}`;
+        const cachedData = localStorage.getItem(cacheKey);
+
+        //const {reversedHost, cachedData} = cachedASN(host);
+
+        if (cachedData) {
+            try {
+                const { asn, prefix, timestamp } = JSON.parse(cachedData);
+                if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
+                    currentRow.ASN = asn;
+                    currentRow.Prefix = prefix;
+                } else {
+                    await fetchASN(reversedHost, cacheKey, currentRow);
+                }
+            } catch {
+                await fetchASN(reversedHost, cacheKey, currentRow);
+            }
+        } else {
+            await fetchASN(reversedHost, cacheKey, currentRow);
+        }
+    }
+};
+
+const handlePingLine = (
+    currentRow: MtrData,
+    lastTime: number,
+    recPacket: number,
+    updateMtrRow: (row: MtrData, lastTime: number) => void,
+    updateLossPercentage: (hop: number) => void
+) => {
+    if (!isNaN(recPacket) && !isNaN(lastTime) && lastTime > 0) {
+        if (!currentRow.ReceivedPackets.includes(recPacket)) {
+            currentRow.ReceivedPackets.push(recPacket);
+            updateMtrRow(currentRow, lastTime);
+            updateLossPercentage(currentRow.Hop);
+        }
+    }
+};
+
+const handleSentPacketLine = (
+    currentRow: MtrData,
+    sentPacket: number,
+    updateLossPercentage: (hop: number) => void
+) => {
+    if (!isNaN(sentPacket) && !currentRow.SentPackets.includes(sentPacket)) {
+        currentRow.SentPackets.push(sentPacket);
+
+        if (0 === currentRow.SentPackets.length % 5) {
+            updateLossPercentage(currentRow.Hop);
+        }
+    }
+};
+
+const createDefaultMtrRow = ((hop: number): MtrData => ({
+    Hop: hop,
+    ASN: "N/A",
+    Prefix: "N/A",
+    Host: "N/A",
+    SentPackets: [],
+    ReceivedPackets: [],
+    Pings: [],
+    Last: Infinity,
+    Best: Infinity,
+    Worst: -Infinity,
+    Avg: 0,
+    StDev: 0,
+    LossPercent: 0,
+    isHidden: false,
+}));
 
 export function NetworkTest() {
     const [output, setOutput] = useState<string>("");
-    const [mtrHead, setMtrHead] = useState<Map<number, MtrHead>>(new Map());
-    const [mtrDataMap, setMtrDataMap] = useState<Map<number, MtrData>>(new Map());
+    const [mtrHead, setMtrHead] = useState<MtrHead[]>([]);
+    const [mtrDataArray, setMtrDataArray] = useState<MtrData[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string>("");
 
@@ -107,30 +177,6 @@ export function NetworkTest() {
         },
         resolver: zodResolver(formSchema),
     });
-
-    // Memoize the default MTR row creation
-    const createDefaultMtrRow = useCallback((hop: number): MtrData => ({
-        Hop: hop,
-        ASN: "N/A",
-        Prefix: "N/A",
-        Host: "N/A",
-        Sent: 0,
-        SentPacket: 0,
-        SentPackets: [],
-        Received: 0,
-        ReceivedPacket: 0,
-        ReceivedPackets: [],
-        Pings: [],
-        TotalTime: 0,
-        VarianceSum: 0,
-        Last: Infinity,
-        Best: Infinity,
-        Worst: -Infinity,
-        Avg: 0,
-        StDev: 0,
-        LossPercent: 0,
-        isHidden: false,
-    }), []);
 
     // Memoize the stats calculation
     const calculateStats = useCallback((pings: number[]) => {
@@ -168,16 +214,17 @@ export function NetworkTest() {
 
     // Memoize the loss percentage update
     const updateLossPercentage = useCallback((hop: number): void => {
-        setMtrDataMap((prev) => {
-            const row = prev.get(hop);
-            if (row) {
+        setMtrDataArray(prev => {
+            const rowIndex = prev.findIndex(row => row.Hop === hop);
+            if (rowIndex !== -1) {
+                const row = prev[rowIndex];
                 if (row.SentPackets.length === 0) {
                     row.LossPercent = 0;
-                    return prev;
+                    return [...prev.slice(0, rowIndex), row, ...prev.slice(rowIndex + 1)];
                 }
-                const receivedSet = new Set(row.ReceivedPackets);
-                const lostPackets = row.SentPackets.filter((seq) => !receivedSet.has(seq));
-                row.LossPercent = (lostPackets.length / row.SentPackets.length) * 100;
+                //const receivedSet = new Set(row.ReceivedPackets);
+                //const lostPackets = row.SentPackets.filter((seq) => !row.ReceivedPackets.includes(seq));
+                row.LossPercent = ((row.SentPackets.length - row.ReceivedPackets.length) / row.SentPackets.length) * 100;
             }
             return prev;
         });
@@ -202,10 +249,10 @@ export function NetworkTest() {
         }
     }, []);
 
-    // Memoize the MTR line parsing
-    const parseMtrLine = useCallback((line: string, prev: Map<number, MtrData>): Map<number, MtrData> => {
-        const newMap = new Map(prev);
+    // Update the parseMtrLine function to use the new handlers
+    const parseMtrLine = useCallback((line: string, prev: MtrData[]): MtrData[] => {
         const lines = line.split("\n").filter((l) => l.trim());
+        const newRows = [...prev];
 
         for (const singleLine of lines) {
             const [type, ...parts] = singleLine.split(/\s+/).filter(Boolean);
@@ -214,88 +261,38 @@ export function NetworkTest() {
             const hop = parseInt(parts[0], 10);
             if (isNaN(hop) || hop < 0) continue;
 
-            const currentRow = newMap.get(hop) || createDefaultMtrRow(hop);
+            const currentRow = newRows.find(row => row.Hop === hop) || createDefaultMtrRow(hop);
+            const prevRow = newRows.find(row => row.Hop === hop - 1);
 
-            switch (type) {
-                case "h":
-                    if (parts[1]) {
-                        currentRow.Host = parts[1];
-                        currentRow.isHidden = parts[1] === newMap.get(hop - 1)?.Host;
-
-                        if (
-                            !currentRow.isHidden &&
-                            parts[1] !== "N/A" &&
-                            !reservedIPv4Regex.test(parts[1])
-                        ) {
-                            const reversedHost = parts[1]
-                                .split(".")
-                                .slice(0, 3)
-                                .reverse()
-                                .join(".");
-                            const cacheKey = `asn_${reversedHost}`;
-                            const cachedData = localStorage.getItem(cacheKey);
-
-                            if (cachedData) {
-                                try {
-                                    const { asn, prefix, timestamp } = JSON.parse(cachedData);
-                                    if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
-                                        currentRow.ASN = asn;
-                                        currentRow.Prefix = prefix;
-                                    } else {
-                                        void fetchASN(reversedHost, cacheKey, currentRow);
-                                    }
-                                } catch {
-                                    void fetchASN(reversedHost, cacheKey, currentRow);
-                                }
-                            } else {
-                                void fetchASN(reversedHost, cacheKey, currentRow);
-                            }
-                        }
-                    }
-                    break;
-                case "p":
-                    if (parts[1] && parts[2]) {
-                        const lastTime = parseFloat(parts[1]);
-                        const recPacket = parseInt(parts[2], 10);
-
-                        if (!isNaN(recPacket) && !isNaN(lastTime) && lastTime > 0) {
-                            if (!currentRow.ReceivedPackets.includes(recPacket)) {
-                                currentRow.Received++;
-                                currentRow.ReceivedPackets.push(recPacket);
-                                currentRow.ReceivedPacket = Math.max(
-                                    currentRow.ReceivedPacket,
-                                    recPacket,
-                                );
-                                updateMtrRow(currentRow, lastTime);
-                                updateLossPercentage(hop);
-                            }
-                        }
-                    }
-                    break;
-                case "x":
-                    if (parts[1]) {
-                        const sentPacket = parseInt(parts[1], 10);
-                        if (
-                            !isNaN(sentPacket) &&
-                            !currentRow.SentPackets.includes(sentPacket)
-                        ) {
-                            currentRow.Sent++;
-                            currentRow.SentPackets.push(sentPacket);
-                            currentRow.SentPacket = Math.max(currentRow.SentPacket, sentPacket);
-
-                            if (10 === currentRow.SentPackets.length) {
-                                updateLossPercentage(hop);
-                            }
-                        }
-                    }
-                    break;
+            if ("h" === type) {
+                if (parts[1]) {
+                    handleHostLine(currentRow, prevRow, parts[1], fetchASN);
+                }
+            }
+            if ("p" === type) {
+                if (parts[1] && parts[2]) {
+                    const lastTime = parseFloat(parts[1]);
+                    const recPacket = parseInt(parts[2], 10);
+                    handlePingLine(currentRow, lastTime, recPacket, updateMtrRow, updateLossPercentage);
+                }
+            }
+            if ("x" === type) {
+                if (parts[1]) {
+                    const sentPacket = parseInt(parts[1], 10);
+                    handleSentPacketLine(currentRow, sentPacket, updateLossPercentage);
+                }
             }
 
-            newMap.set(hop, currentRow);
+            const rowIndex = newRows.findIndex(row => row.Hop === hop);
+            if (rowIndex !== -1) {
+                newRows[rowIndex] = currentRow;
+            } else {
+                newRows.push(currentRow);
+            }
         }
 
-        return newMap;
-    }, [createDefaultMtrRow, updateMtrRow, updateLossPercentage, fetchASN]);
+        return newRows.sort((a, b) => a.Hop - b.Hop);
+    }, [updateMtrRow, updateLossPercentage, fetchASN]);
 
     // Handle streamed response
     const handleStreamedResponse = useCallback(async (response: Response, command: string) => {
@@ -314,9 +311,9 @@ export function NetworkTest() {
                     if (command.startsWith("livemtr")) {
                         const data = JSON.parse(line);
                         if (data.type === "system_info") {
-                            setMtrHead(prev => new Map(prev).set(0, { hostname: data.hostname, ips: data.ips }));
+                            setMtrHead([{ hostname: data.hostname, ips: data.ips }]);
                         } else if (data.output !== undefined) {
-                            setMtrDataMap(prev => parseMtrLine(data.output, prev));
+                            setMtrDataArray(prev => parseMtrLine(data.output, prev));
                         }
                     } else {
                         const data = JSON.parse(line);
@@ -337,7 +334,7 @@ export function NetworkTest() {
     // Handle form submission
     const onSubmit = useCallback(async (values: FormValues) => {
         setOutput("");
-        setMtrDataMap(new Map());
+        setMtrDataArray([]);
         setIsLoading(true);
         setError("");
 
@@ -361,8 +358,8 @@ export function NetworkTest() {
 
     // Memoize the sorted MTR data
     const sortedMtrData = useMemo(() =>
-        [...mtrDataMap.values()].sort((a, b) => a.Hop - b.Hop),
-        [mtrDataMap]
+        [...mtrDataArray].sort((a, b) => a.Hop - b.Hop),
+        [mtrDataArray]
     );
 
     return (
@@ -469,7 +466,7 @@ export function NetworkTest() {
                     <div className="w-full overflow-x-auto">
                         <MtrTable
                             data={sortedMtrData}
-                            sourceInfo={mtrHead.get(0)}
+                            sourceInfo={mtrHead[0]}
                             target={control._formValues.targetHost}
                         />
                     </div>

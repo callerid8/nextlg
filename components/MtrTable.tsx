@@ -2,7 +2,23 @@ import { memo, useState, useEffect } from "react";
 import Link from "next/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import type { MtrData } from "@/lib/mtr";
+
+interface MtrData {
+    Hop: number;
+    ASN: string;
+    Prefix: string;
+    Host: string;
+    SentPackets: number[];
+    ReceivedPackets: number[];
+    Pings: number[];
+    Last: number;
+    Best: number;
+    Worst: number;
+    Avg: number;
+    StDev: number;
+    LossPercent: number;
+    isHidden: boolean;
+}
 
 interface MtrTableProps {
     data: MtrData[];
@@ -161,7 +177,7 @@ export const MtrTable = memo(({ data, sourceInfo, target }: MtrTableProps) => {
                                 href={row.Prefix !== "N/A" ? `https://bgp.he.net/net/${row.Prefix}` : undefined}
                             />
                             <TableCell>{isNaN(row.LossPercent) ? 0.0 : (row.LossPercent).toFixed(1)}</TableCell>
-                            <TableCell>{row.Sent}</TableCell>
+                            <TableCell>{row.SentPackets.length}</TableCell>
                             <TableCell>{row.Last === Infinity ? "N/A" : (row.Last).toFixed(2)}</TableCell>
                             <TableCell>{row.Avg === 0 ? "N/A" : (row.Avg).toFixed(2)}</TableCell>
                             <TableCell>{row.Best === Infinity ? "N/A" : (row.Best).toFixed(2)}</TableCell>

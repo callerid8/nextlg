@@ -7,14 +7,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { AlertCircle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import LoadingSpinner from "@/components/LoadingSpinner";
 
 // Constants
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
 const TEST_SIZES = {
     SMALL: {
-        download: 16 * 1024 * 1024,  // 16MB
-        upload: 4 * 1024 * 1024,     // 4MB
-        label: 'Small (16MB ↓, 4MB ↑)'
+        download: 16 * 1024 * 1024,  // 32MB
+        upload: 8 * 1024 * 1024,     // 8MB
+        label: 'Small (16MB ↓, 8MB ↑)'
     },
     MEDIUM: {
         download: 64 * 1024 * 1024,  // 64MB
@@ -31,21 +32,19 @@ const CONCURRENT_REQUESTS = 8;
 const MAX_RETRIES = 3;
 const PROGRESS_UPDATE_INTERVAL = 100; // 500ms
 const TEST_TIMEOUT = 60000; // 1 minute timeout
+const UPLOAD_CHUNK_POOL_SIZE = 4; // Number of reusable chunks for upload
 
 interface SpeedTestResults {
     downloadSpeed: number;
     uploadSpeed: number;
 }
 
-const LoadingSpinner = () => (
-    <div
-        className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]"
-        role="status"
-        aria-label="Loading"
-    >
-        <span className="sr-only">Loading...</span>
-    </div>
-);
+interface SpeedMetrics {
+    avgSpeed: number;
+    lastSpeed: number;
+    startTime: number;
+    lastUpdate: number;
+}
 
 const clearCache = async () => {
     if ("caches" in window) {
@@ -67,31 +66,54 @@ export function Speedtest() {
         type: 'network' | 'timeout' | 'unknown';
         message: string;
     } | null>(null);
+    const chunkPool = useRef<Uint8Array[]>([]);
+    const metrics = useRef<SpeedMetrics>({
+        avgSpeed: 0,
+        lastSpeed: 0,
+        startTime: 0,
+        lastUpdate: 0
+    });
 
-    const createRandomChunks = useCallback((size: number, chunkSize: number): Uint8Array[] => {
-        const chunks: Uint8Array[] = [];
-        const maxCryptoSize = 65536; // Max size for crypto.getRandomValues
+    const createUploadChunk = useCallback((chunkId: number, size: number): Uint8Array => {
+        // Add performance mark
+        performance.mark('chunk-start');
 
-        for (let i = 0; i < size; i += chunkSize) {
-            const length = Math.min(chunkSize, size - i);
-            const chunk = new Uint8Array(length);
+        // Reuse chunk from pool if available
+        if (chunkPool.current.length > 0) {
+            const chunk = chunkPool.current.pop()!;
+            const view = new DataView(chunk.buffer);
+            const pattern = (chunkId & 0xffff) | ((chunkId & 0xff) << 16);
 
-            for (let j = 0; j < length; j += maxCryptoSize) {
-                const subLength = Math.min(maxCryptoSize, length - j);
-                const tempBuffer = new Uint8Array(subLength);
-                crypto.getRandomValues(tempBuffer);
-                chunk.set(tempBuffer, j);
+            for (let i = 0; i < size; i += 4) {
+                if (i + 4 <= size) {
+                    view.setUint32(i, pattern + (i & 0xffff), true);
+                }
             }
-
-            chunks.push(chunk);
+            return chunk;
         }
 
-        return chunks;
+        // Create new chunk if pool is empty
+        const chunk = new Uint8Array(size);
+        const view = new DataView(chunk.buffer);
+        const pattern = (chunkId & 0xffff) | ((chunkId & 0xff) << 16);
+
+        for (let i = 0; i < size; i += 4) {
+            if (i + 4 <= size) {
+                view.setUint32(i, pattern + (i & 0xffff), true);
+            }
+        }
+
+        performance.mark('chunk-end');
+        performance.measure('chunk-creation', 'chunk-start', 'chunk-end');
+
+        return chunk;
     }, []);
 
     useEffect(() => {
         return () => {
             abortControllerRef.current?.abort();
+            performance.clearMarks();
+            performance.clearMeasures();
         };
     }, []);
 
@@ -127,39 +149,57 @@ export function Speedtest() {
         }
     }, [abortControllerRef]);
 
-    const uploadChunk = useCallback(async (chunk: Uint8Array, chunkId: number, retryCount = 0): Promise<void> => {
+    const uploadChunk = useCallback(async (chunkId: number, retryCount = 0): Promise<void> => {
+        let chunk: Uint8Array | undefined;
         try {
+            chunk = createUploadChunk(chunkId, CHUNK_SIZE);
             const uniqueId = `${Date.now()}-${chunkId}`;
+            console.log(`Sending chunk ${chunkId} with headers...`);
+
             const response = await fetch(`/api/speedtest/${uniqueId}`, {
                 method: "POST",
                 body: chunk,
                 signal: abortControllerRef.current?.signal,
                 headers: {
                     "Content-Type": "application/octet-stream",
+                    "Content-Length": chunk.length.toString(),
+                    "X-Chunk-ID": chunkId.toString(), // Match exact case
                     "Cache-Control": "no-cache, no-store, must-revalidate",
                     "Pragma": "no-cache"
                 }
             });
 
             if (!response.ok) {
-                throw new Error(`Chunk upload failed (ID: ${chunkId})`);
+                const errorData = await response.json().catch(() => ({}));
+                console.error('Upload error:', errorData);
+                throw new Error(`Upload failed (${response.status}): ${errorData.error || 'Unknown error'}`);
             }
         } catch (error) {
             if (retryCount < MAX_RETRIES && !abortControllerRef.current?.signal.aborted) {
                 await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
-                return uploadChunk(chunk, chunkId, retryCount + 1);
+                return uploadChunk(chunkId, retryCount + 1);
             }
             throw error;
+        } finally {
+            // Return chunk to pool if possible
+            if (chunk && chunkPool.current.length < UPLOAD_CHUNK_POOL_SIZE) {
+                chunkPool.current.push(chunk);
+            }
         }
-    }, [abortControllerRef]);
+    }, [createUploadChunk]);
 
     const runTest = useCallback(async (
         isUpload: boolean,
         chunkHandler: (chunkId: number) => Promise<ArrayBuffer | void>
     ) => {
-        const startTime = performance.now();
+        metrics.current = {
+            avgSpeed: 0,
+            lastSpeed: 0,
+            startTime: performance.now(),
+            lastUpdate: performance.now()
+        };
         let totalBytes = 0;
-        let lastProgressUpdate = startTime;
+        let lastProgressUpdate = metrics.current.startTime;
 
         const size = isUpload ? testSize.upload : testSize.download;
         const TOTAL_CHUNKS = Math.ceil(size / CHUNK_SIZE);
@@ -167,43 +207,63 @@ export function Speedtest() {
         const activePromises = new Set();
         const chunkQueue = Array.from({ length: TOTAL_CHUNKS }, (_, i) => i);
 
-        while (chunkQueue.length > 0 || activePromises.size > 0) {
-            while (chunkQueue.length > 0 && activePromises.size < CONCURRENT_REQUESTS) {
-                const chunkId = chunkQueue.shift()!;
-                const promise = chunkHandler(chunkId)
-                    .then(() => {
-                        totalBytes += CHUNK_SIZE;
-                        completedChunks++;
+        const updateMetrics = (bytes: number) => {
+            const now = performance.now();
+            const duration = (now - metrics.current.lastUpdate) / 1000;
+            if (duration >= 1) {
+                metrics.current.lastSpeed = (bytes * 8) / (1024 * 1024 * duration);
+                metrics.current.avgSpeed = (totalBytes * 8) / (1024 * 1024 * ((now - metrics.current.startTime) / 1000));
+                metrics.current.lastUpdate = now;
+                return true;
+            }
+            return false;
+        };
 
-                        const now = performance.now();
-                        if (now - lastProgressUpdate > PROGRESS_UPDATE_INTERVAL) {
-                            setProgress((completedChunks / TOTAL_CHUNKS) * 100);
-                            lastProgressUpdate = now;
-                        }
+        try {
+            while (chunkQueue.length > 0 || activePromises.size > 0) {
+                while (chunkQueue.length > 0 && activePromises.size < CONCURRENT_REQUESTS) {
+                    const chunkId = chunkQueue.shift()!;
+                    const promise = chunkHandler(chunkId)
+                        .then(() => {
+                            totalBytes += CHUNK_SIZE;
+                            completedChunks++;
 
-                        activePromises.delete(promise);
-                    })
-                    .catch(error => {
-                        console.error("Test error:", error.message);
-                        activePromises.delete(promise);
-                        throw error;
-                    });
+                            if (updateMetrics(CHUNK_SIZE)) {
+                                console.debug(`Current speed: ${metrics.current.lastSpeed.toFixed(2)} Mbps`);
+                            }
 
-                activePromises.add(promise);
+                            const now = performance.now();
+                            if (now - lastProgressUpdate > PROGRESS_UPDATE_INTERVAL) {
+                                setProgress((completedChunks / TOTAL_CHUNKS) * 100);
+                                lastProgressUpdate = now;
+                            }
+
+                            activePromises.delete(promise);
+                        })
+                        .catch(error => {
+                            console.error("Test error:", error.message);
+                            activePromises.delete(promise);
+                            throw error;
+                        });
+
+                    activePromises.add(promise);
+                }
+
+                if (activePromises.size > 0) {
+                    await Promise.race(Array.from(activePromises));
+                }
             }
 
-            if (activePromises.size > 0) {
-                await Promise.race(Array.from(activePromises));
-            }
+            setProgress(100);
+
+            const finalSpeed = (totalBytes * 8) / (1024 * 1024 * ((performance.now() - metrics.current.startTime) / 1000));
+            console.debug(`Test completed. Average speed: ${finalSpeed.toFixed(2)} Mbps`);
+            return finalSpeed;
+
+        } catch (error) {
+            console.error(`${isUpload ? 'Upload' : 'Download'} error:`, error);
+            throw error;
         }
-
-        setProgress(100);
-
-        const endTime = performance.now();
-        const durationInSeconds = (endTime - startTime) / 1000;
-        const speedMbps = (totalBytes * 8) / (1024 * 1024 * durationInSeconds);
-
-        return speedMbps;
     }, [testSize]);
 
     const runDownloadTest = useCallback(async () => {
@@ -229,10 +289,12 @@ export function Speedtest() {
         setProgress(0);
 
         try {
-            const chunks = createRandomChunks(testSize.upload, CHUNK_SIZE);
-            const speed = await runTest(true,
-                (chunkId) => uploadChunk(chunks[chunkId], chunkId)
-            );
+            // Initialize chunk pool
+            chunkPool.current = Array(UPLOAD_CHUNK_POOL_SIZE)
+                .fill(null)
+                .map(() => new Uint8Array(CHUNK_SIZE));
+
+            const speed = await runTest(true, uploadChunk);
             setResults(prev => ({
                 downloadSpeed: prev?.downloadSpeed || 0,
                 uploadSpeed: speed
@@ -246,8 +308,11 @@ export function Speedtest() {
                 });
                 console.error("Upload test error:", err);
             }
+        } finally {
+            // Clear chunk pool
+            chunkPool.current = [];
         }
-    }, [runTest, uploadChunk, testSize, createRandomChunks]);
+    }, [runTest, uploadChunk]);
 
     const runSpeedTest = async () => {
         if (timeoutId) clearTimeout(timeoutId);
@@ -346,7 +411,7 @@ export function Speedtest() {
                 </div>
 
                 {results && (
-                    <div className="grid grid-cols-2 gap-2 py-2 items-center space-y-2">
+                    <div className="grid grid-cols-2 gap-2 py-2 items-center">
                         <div>
                             <p className="text-sm font-medium">Download↓</p>
                             <p className="text-2xl font-bold">{results.downloadSpeed.toFixed(2)} Mbps</p>

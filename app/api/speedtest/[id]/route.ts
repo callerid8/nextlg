@@ -1,5 +1,9 @@
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
 const REQUEST_TIMEOUT = 30000; // 30 seconds
+const MAX_CHUNK_CACHE_SIZE = 32; // Cache up to 32 chunks
+
+// Cache frequently used chunks
+const chunkCache = new Map<number, Uint8Array>();
 
 const HTTP_HEADERS = {
   JSON: { "Content-Type": "application/json" },
@@ -11,21 +15,32 @@ const HTTP_HEADERS = {
   },
 } as const;
 
-//type Params = Promise<{ id: string }>;
+// Add request tracking
+const activeRequests = new Set<string>();
 
-function createChunk(chunkSize: number): Uint8Array {
-  if (chunkSize <= 0 || chunkSize % 4 !== 0) {
-    throw new Error("Chunk size must be a positive multiple of 4");
+type Params = Promise<{ id: string }>;
+
+function createChunk(idNumber: number, chunkSize: number): Uint8Array {
+  // Check cache first
+  const cacheKey = idNumber % MAX_CHUNK_CACHE_SIZE;
+  if (chunkCache.has(cacheKey)) {
+    return chunkCache.get(cacheKey)!;
   }
 
   const result = new Uint8Array(chunkSize);
-  const maxCryptoSize = 65536; // Max size for crypto.getRandomValues
+  const view = new DataView(result.buffer);
 
-  for (let offset = 0; offset < chunkSize; offset += maxCryptoSize) {
-    const length = Math.min(maxCryptoSize, chunkSize - offset);
-    const tempBuffer = new Uint8Array(length);
-    crypto.getRandomValues(tempBuffer);
-    result.set(tempBuffer, offset);
+  // Generate deterministic pattern based on idNumber
+  const pattern = (idNumber & 0xffff) | ((idNumber & 0xff) << 16);
+
+  // Fill the buffer with the pattern
+  for (let i = 0; i < chunkSize; i += 4) {
+    view.setUint32(i, pattern + (i & 0xffff), true);
+  }
+
+  // Cache the chunk if we haven't reached max size
+  if (chunkCache.size < MAX_CHUNK_CACHE_SIZE) {
+    chunkCache.set(cacheKey, result);
   }
 
   return result;
@@ -41,57 +56,112 @@ function createErrorResponse(error: unknown, status = 400): Response {
   });
 }
 
-export async function GET(): Promise<Response> {
+export async function GET(
+  request: Request,
+  { params }: { params: Params },
+): Promise<Response> {
+  const startTime = performance.now();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
+  const { id } = await params;
   try {
-    const chunk = createChunk(CHUNK_SIZE);
-    clearTimeout(timeoutId);
+    if (!id || activeRequests.has(id))
+      throw new Error("Invalid or duplicate request");
+    activeRequests.add(id);
 
-    return new Response(chunk, {
-      headers: HTTP_HEADERS.BINARY,
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const chunk = await new Promise<Uint8Array>((resolve) => {
+            queueMicrotask(() =>
+              resolve(
+                createChunk(parseInt(id.split("-")[1] || "0", 10), CHUNK_SIZE),
+              ),
+            );
+          });
+          controller.enqueue(chunk);
+        } catch (error) {
+          controller.error(error);
+        } finally {
+          controller.close();
+        }
+      },
+      cancel() {
+        clearTimeout(timeoutId);
+      },
+    });
+
+    const duration = performance.now() - startTime;
+    return new Response(stream, {
+      headers: {
+        ...HTTP_HEADERS.BINARY,
+        "X-Response-Time": `${duration.toFixed(2)}ms`,
+        "X-Request-ID": id,
+      },
     });
   } catch (error) {
     clearTimeout(timeoutId);
     return createErrorResponse(error);
+  } finally {
+    activeRequests.delete(id!);
   }
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const startTime = performance.now();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
   try {
     if (!request.body) throw new Error("Request body is missing");
 
-    const reader = request.body.getReader();
-    let bytesRead = 0;
+    const contentLength = request.headers.get("content-length");
+    const chunkId = request.headers.get("x-chunk-id");
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) bytesRead += value.length;
-      if (bytesRead > CHUNK_SIZE * 2) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
+    if (!contentLength || !chunkId) {
+      throw new Error("Missing required headers");
     }
 
-    clearTimeout(timeoutId);
+    const size = parseInt(contentLength);
+    if (size > CHUNK_SIZE * 2) {
+      throw new Error("Request too large");
+    }
+
+    let bytesRead = 0;
+    const reader = request.body.getReader();
+
+    try {
+      while (!controller.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        if (value) {
+          bytesRead += value.length;
+          if (bytesRead > size) {
+            throw new Error("Upload size mismatch");
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const duration = performance.now() - startTime;
     return new Response(
-      JSON.stringify({ success: true, bytesReceived: bytesRead }),
-      { headers: HTTP_HEADERS.JSON },
+      JSON.stringify({
+        success: true,
+        bytesReceived: bytesRead,
+        duration: duration.toFixed(2),
+      }),
+      {
+        headers: {
+          ...HTTP_HEADERS.JSON,
+          "X-Response-Time": `${duration.toFixed(2)}ms`,
+        },
+      },
     );
   } catch (error) {
     clearTimeout(timeoutId);
-    if (
-      error &&
-      typeof error === "object" &&
-      "name" in error &&
-      error.name === "AbortError"
-    ) {
-      return createErrorResponse("Request timeout", 408);
-    }
-    return createErrorResponse(error, 500);
+    return createErrorResponse(error);
   }
 }
