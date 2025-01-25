@@ -37,6 +37,47 @@ interface DnsResponse {
 const LOCALSTORAGE_CACHE_DURATION = 12 * 60 * 60 * 1000;
 const DNS_API_URL = "https://dns.google/resolve";
 
+// Utility function to normalize IPv6 address
+function expandIPv6(address: string): string {
+    // Handle special case of ::
+    if (address === '::') {
+        return '0000:0000:0000:0000:0000:0000:0000:0000';
+    }
+
+    // Handle starting/ending ::
+    let expanded = address;
+    if (expanded.startsWith('::')) expanded = '0' + expanded;
+    if (expanded.endsWith('::')) expanded = expanded + '0';
+
+    // Count number of groups and colons
+    const groups = expanded.split(':');
+    const doubleColonIndex = groups.indexOf('');
+
+    // Handle compressed zeros (::)
+    if (doubleColonIndex !== -1) {
+        // Remove empty element
+        groups.splice(doubleColonIndex, 1);
+
+        // Calculate missing groups
+        const missing = 8 - groups.length;
+
+        // Insert required number of zero groups
+        const zeros = Array(missing).fill('0000');
+        groups.splice(doubleColonIndex, 0, ...zeros);
+    }
+
+    // Ensure each group is 4 characters
+    return groups
+        .map(g => g.padStart(4, '0'))
+        .join('')
+        .toLowerCase();
+}
+
+function expandIPv6ToNibbles(address: string): string {
+    const expanded = expandIPv6(address);
+    return expanded;
+}
+
 // Add helper function for timestamp
 function getFormattedTimestamp() {
     return new Intl.DateTimeFormat('en-US', {
@@ -50,13 +91,29 @@ function getFormattedTimestamp() {
     }).format(new Date()).replace(/(\d+)\/(\d+)\/(\d+)/, '$3-$1-$2');
 }
 
+// Add IPv6 detection helper
+function isIPAddress(ip: string): { isIp: boolean; version: 4 | 6 | null } {
+    const ipv4Pattern = /^(\d{1,3}\.){3}\d{1,3}$/;
+    const ipv6Pattern = /^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,7}:|^([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}$|^([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}$|^([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}$|^([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})$|^:((:[0-9a-fA-F]{1,4}){1,7}|:)$/;
+
+    if (ipv4Pattern.test(ip)) return { isIp: true, version: 4 };
+    if (ipv6Pattern.test(ip)) return { isIp: true, version: 6 };
+    return { isIp: false, version: null };
+}
+
 const resolveDns = async (
     target: string,
     isIp: boolean,
+    sourceIps?: string[],
 ): Promise<string | null> => {
-    const cacheKey = `${isIp ? "ptr" : "a"}_${target}`;
-    const cachedData = localStorage.getItem(cacheKey);
+    const ipInfo = isIPAddress(target);
+    const sourceIsIpv6 = sourceIps?.[0]?.includes(':');
+    const recordType = isIp
+        ? "ptr"
+        : (ipInfo.version === 6 || sourceIsIpv6 ? "aaaa" : "a");
+    const cacheKey = `${recordType}_${target}`;
 
+    const cachedData = localStorage.getItem(cacheKey);
     if (cachedData) {
         try {
             const { value, timestamp } = JSON.parse(cachedData);
@@ -64,17 +121,30 @@ const resolveDns = async (
                 return value;
             }
         } catch (error) {
-            console.error("Failed to parse cached DNS data:", error);
+            // Cache invalid or expired, continue to fetch
         }
     }
 
     try {
-        const type = isIp ? "ptr" : "a";
-        const query = isIp
-            ? target.split(".").reverse().join(".") + ".in-addr.arpa"
-            : target;
+        let query = target;
 
-        const response = await fetch(`${DNS_API_URL}?name=${query}&type=${type}`);
+        if (isIp) {
+            if (ipInfo.version === 4) {
+                query = target.split(".").reverse().join(".") + ".in-addr.arpa";
+            } else if (ipInfo.version === 6) {
+                const expandedNibbles = expandIPv6ToNibbles(target);
+                if (expandedNibbles.length !== 32) {
+                    return null;
+                }
+                query = expandedNibbles
+                    .split('')
+                    .reverse()
+                    .join('.')
+                    + '.ip6.arpa';
+            }
+        }
+
+        const response = await fetch(`${DNS_API_URL}?name=${query}&type=${recordType}`);
         const data: DnsResponse = await response.json();
 
         if (data.Status === 0 && data.Answer?.[0]) {
@@ -87,7 +157,6 @@ const resolveDns = async (
         }
         return null;
     } catch (error) {
-        console.error("DNS lookup failed:", error);
         return null;
     }
 }
@@ -120,10 +189,16 @@ export const MtrTable = memo(({ data, sourceInfo, target }: MtrTableProps) => {
 
     useEffect(() => {
         if (target) {
-            const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(target);
-            resolveDns(target, isIp).then(setResolvedTarget);
+            const { isIp, version } = isIPAddress(target);
+
+            resolveDns(target, isIp, sourceInfo?.ips)
+                .then(result => {
+                    setResolvedTarget(result);
+                })
+                .catch(error => {
+                });
         }
-    }, [target]);
+    }, [target, sourceInfo]);
 
     return (
         <Table className="text-xs font-mono">

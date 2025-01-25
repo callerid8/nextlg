@@ -52,21 +52,65 @@ const LOCALSTORAGE_CACHE_DURATION = 12 * 60 * 60 * 1000;
 const DNS_API_URL = "https://dns.google/resolve";
 const MAX_PACKETS = 100;
 const reservedIPv4Regex = /^(?:0\.0\.0\.|10\.(?:[0-9]{1,2}\.){2}|100\.(?:6[4-9]|7[0-9]|8[0-9]|9[0-9])\.(?:[0-9]{1,2}\.)|127\.(?:[0-9]{1,2}\.){2}|169\.254\.(?:[0-9]{1,2}\.)|172\.(?:1[6-9]|2[0-9]|3[0-1])\.(?:[0-9]{1,2}\.)|192\.(?:0\.0\.|0\.2\.|168\.)|198\.(?:1[8-9]\.|51\.(?:100\.))|203\.0\.113\.|2(?:2[4-9]|3[0-9])\.(?:[0-9]{1,2}\.){2}|240\.(?:[0-9]{1,2}\.){3}|255\.255\.255\.255)$/;
+const reservedIPv6Regex = /^(?::|fe80:|fc00:|fd00:|::1$)/i;
 
 const formSchema = z.object({
     targetHost: z.string()
         .min(1, "Target host is required")
         .refine(host => {
             const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
-            // Updated domain regex to allow numbers in TLD
+            const ipv6Regex = /^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,7}:|^([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}$|^([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}$|^([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}$|^([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})$|^:((:[0-9a-fA-F]{1,4}){1,7}|:)$/;
             const domainRegex = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
-            return ipv4Regex.test(host) || domainRegex.test(host);
+            return ipv4Regex.test(host) || ipv6Regex.test(host) || domainRegex.test(host);
         }, "Invalid IP address or domain name"),
-    command: z.enum(["ping", "host", "mtr", "livemtr", "ping6", "mtr6"]),
+    command: z.enum(["ping", "host", "mtr", "livemtr", "livemtr6", "ping6", "mtr6"]),
 });
 
 type FormValues = z.infer<typeof formSchema>;
 
+// Utility function to normalize IPv6 address
+function expandIPv6(address: string): string {
+    // Handle special case of ::
+    if (address === '::') {
+        return '0000:0000:0000:0000:0000:0000:0000:0000';
+    }
+
+    // Handle starting/ending ::
+    let expanded = address;
+    if (expanded.startsWith('::')) expanded = '0' + expanded;
+    if (expanded.endsWith('::')) expanded = expanded + '0';
+
+    // Count number of groups and colons
+    const groups = expanded.split(':');
+    const doubleColonIndex = groups.indexOf('');
+
+    // Handle compressed zeros (::)
+    if (doubleColonIndex !== -1) {
+        // Remove empty element
+        groups.splice(doubleColonIndex, 1);
+
+        // Calculate missing groups
+        const missing = 8 - groups.length;
+
+        // Insert required number of zero groups
+        const zeros = Array(missing).fill('0000');
+        groups.splice(doubleColonIndex, 0, ...zeros);
+    }
+
+    // Ensure each group is 4 characters
+    return groups
+        .map(g => g.padStart(4, '0'))
+        .join('')
+        .toLowerCase();
+}
+
+function expandIPv6ToNibbles(address: string): string {
+    const expanded = expandIPv6(address);
+    return expanded.replace(/:/g, '');
+}
+
+
+// Utility Functions
 const handleHostLine = async (
     currentRow: MtrData,
     prevRow: MtrData | undefined,
@@ -76,33 +120,55 @@ const handleHostLine = async (
     currentRow.Host = host;
     currentRow.isHidden = host === prevRow?.Host;
 
-    if (!reservedIPv4Regex.test(host)) {
-        const reversedHost = host
-            .split(".")
+    // Skip ASN lookup for reserved/private addresses
+    if (reservedIPv4Regex.test(host) || reservedIPv6Regex.test(host)) {
+        return;
+    }
+
+    let reversedHost: string;
+    let cacheKey: string;
+
+    if (host.includes(':')) {
+        // Handle IPv6 address with proper expansion
+        const expandedNibbles = expandIPv6ToNibbles(host);
+
+        if (expandedNibbles.length !== 32) {
+            return;
+        }
+
+        // Properly format for ASN lookup
+        reversedHost = expandedNibbles
+            .split('')
+            .reverse()
+            .join('.');
+        cacheKey = `asn6_${host}`; // Use original host for cache key
+
+    } else {
+        // Handle IPv4 address
+        reversedHost = host
+            .split('.')
             .slice(0, 3)
             .reverse()
-            .join(".");
-        const cacheKey = `asn_${reversedHost}`;
-        const cachedData = localStorage.getItem(cacheKey);
+            .join('.');
+        cacheKey = `asn4_${host}`;
+    }
 
-        //const {reversedHost, cachedData} = cachedASN(host);
-
-        if (cachedData) {
-            try {
-                const { asn, prefix, timestamp } = JSON.parse(cachedData);
-                if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
-                    currentRow.ASN = asn;
-                    currentRow.Prefix = prefix;
-                } else {
-                    await fetchASN(reversedHost, cacheKey, currentRow);
-                }
-            } catch {
-                await fetchASN(reversedHost, cacheKey, currentRow);
+    // Check cache
+    const cachedData = localStorage.getItem(cacheKey);
+    if (cachedData) {
+        try {
+            const { asn, prefix, timestamp } = JSON.parse(cachedData);
+            if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
+                currentRow.ASN = asn;
+                currentRow.Prefix = prefix;
+                return;
             }
-        } else {
-            await fetchASN(reversedHost, cacheKey, currentRow);
+        } catch {
+            // Cache invalid or expired, continue to fetch
         }
     }
+
+    await fetchASN(reversedHost, cacheKey, currentRow);
 };
 
 const handlePingLine = (
@@ -158,9 +224,10 @@ export function NetworkTest() {
     const [mtrDataArray, setMtrDataArray] = useState<MtrData[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string>("");
+    //const [clearError] = useState(() => () => setError(""));
 
-    const ipv4Address = process.env.NEXT_PUBLIC_IPV4_ADDRESS || "";
-    const ipv6Address = process.env.NEXT_PUBLIC_IPV6_ADDRESS || "";
+    const ipv4Address = process.env.NEXT_PUBLIC_IPV4_ADDRESS || "127.0.0.1";
+    const ipv6Address = process.env.NEXT_PUBLIC_IPV6_ADDRESS || "::1";
 
     // Get the file URLs from environment variables
     const file1Url = process.env.NEXT_PUBLIC_FILE1_URL || "/api/download/10mb";
@@ -233,19 +300,35 @@ export function NetworkTest() {
     // Memoize the ASN fetch
     const fetchASN = useCallback(async (reversedHost: string, cacheKey: string, currentRow: MtrData) => {
         try {
-            const response = await fetch(`${DNS_API_URL}?name=${reversedHost}.origin.asn.cymru.com&type=txt`);
-            if (!response.ok) throw new Error("Failed to fetch ASN data");
+            let queryHost = cacheKey.startsWith('asn6_')
+                ? `${reversedHost}.origin6.asn.cymru.com`
+                : `${reversedHost}.origin.asn.cymru.com`;
+
+            const asnLookupUrl = `${DNS_API_URL}?name=${queryHost}&type=txt`;
+            const response = await fetch(asnLookupUrl);
+
+            if (!response.ok) return;
 
             const data = await response.json();
-            if (data.Answer?.[0]?.data) {
-                const asn = data.Answer[0].data.split(" |")[0].trim().split(" ")[0].trim();
-                const prefix = data.Answer[0].data.split(" |")[1].trim().split(" ")[0].trim();
+            if (!data.Answer?.[0]?.data) return;
+
+            const asnData = data.Answer[0].data.split('|').map((s: string) => s.trim());
+            if (asnData.length < 2) return;
+
+            const asn = asnData[0].split(' ')[0];
+            const prefix = asnData[1].split(' ')[0];
+
+            if (asn && prefix) {
                 currentRow.ASN = asn;
                 currentRow.Prefix = prefix;
-                localStorage.setItem(cacheKey, JSON.stringify({ asn, prefix, timestamp: Date.now() }));
+                localStorage.setItem(cacheKey, JSON.stringify({
+                    asn,
+                    prefix,
+                    timestamp: Date.now()
+                }));
             }
         } catch (error) {
-            console.error("Failed to fetch ASN:", error);
+            // Silently handle errors
         }
     }, []);
 
@@ -291,7 +374,7 @@ export function NetworkTest() {
             }
         }
 
-        return newRows.sort((a, b) => a.Hop - b.Hop);
+        return newRows //.sort((a, b) => a.Hop - b.Hop);
     }, [updateMtrRow, updateLossPercentage, fetchASN]);
 
     // Handle streamed response
@@ -324,7 +407,6 @@ export function NetworkTest() {
                         }
                     }
                 } catch (error) {
-                    console.error("Failed to parse event data:", error);
                     setOutput(prev => `${prev}\nError parsing output: ${error instanceof Error ? error.message : "Unknown error"}`);
                 }
             }
@@ -349,7 +431,6 @@ export function NetworkTest() {
 
             await handleStreamedResponse(response, values.command);
         } catch (error) {
-            console.error("Fetch failed:", error);
             setError(error instanceof Error ? error.message : "Network error. Please try again later.");
         } finally {
             setIsLoading(false);
@@ -422,8 +503,9 @@ export function NetworkTest() {
                                     <SelectContent>
                                         <SelectItem value="host">host</SelectItem>
                                         <SelectItem value="mtr">mtr</SelectItem>
-                                        <SelectItem value="livemtr">mtr --live</SelectItem>
+                                        <SelectItem value="livemtr">mtr (live)</SelectItem>
                                         {ipv6Address && (<SelectItem value="mtr6">mtr -6</SelectItem>)}
+                                        {ipv6Address && (<SelectItem value="livemtr6">mtr -6 (live)</SelectItem>)}
                                         <SelectItem value="ping">ping</SelectItem>
                                         {ipv6Address && (<SelectItem value="ping6">ping -6</SelectItem>)}
                                     </SelectContent>

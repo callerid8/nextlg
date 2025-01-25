@@ -1,9 +1,6 @@
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+const DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
 const REQUEST_TIMEOUT = 30000; // 30 seconds
-const MAX_CHUNK_CACHE_SIZE = 32; // Cache up to 32 chunks
-
-// Cache frequently used chunks
-const chunkCache = new Map<number, Uint8Array>();
 
 const HTTP_HEADERS = {
   JSON: { "Content-Type": "application/json" },
@@ -15,18 +12,25 @@ const HTTP_HEADERS = {
   },
 } as const;
 
-// Add request tracking
-const activeRequests = new Set<string>();
-
 type Params = Promise<{ id: string }>;
 
-function createChunk(idNumber: number, chunkSize: number): Uint8Array {
-  // Check cache first
-  const cacheKey = idNumber % MAX_CHUNK_CACHE_SIZE;
-  if (chunkCache.has(cacheKey)) {
-    return chunkCache.get(cacheKey)!;
+/*function createChunk(idNumber: number, chunkSize: number): Uint8Array {
+  const result = new Uint8Array(chunkSize);
+  const pattern = (idNumber & 0xffff) | ((idNumber & 0xff) << 16);
+
+  for (let i = 0; i < chunkSize / 4; i++) {
+    const value = pattern + i;
+    // Little-endian byte order
+    result[i * 4] = value & 0xff;
+    result[i * 4 + 1] = (value >> 8) & 0xff;
+    result[i * 4 + 2] = (value >> 16) & 0xff;
+    result[i * 4 + 3] = (value >> 24) & 0xff;
   }
 
+  return result;
+}*/
+
+function createChunk(idNumber: number, chunkSize: number): Uint8Array {
   const result = new Uint8Array(chunkSize);
   const view = new DataView(result.buffer);
 
@@ -38,18 +42,12 @@ function createChunk(idNumber: number, chunkSize: number): Uint8Array {
     view.setUint32(i, pattern + (i & 0xffff), true);
   }
 
-  // Cache the chunk if we haven't reached max size
-  if (chunkCache.size < MAX_CHUNK_CACHE_SIZE) {
-    chunkCache.set(cacheKey, result);
-  }
-
   return result;
 }
 
 function createErrorResponse(error: unknown, status = 400): Response {
   const message =
     error instanceof Error ? error.message : "An unexpected error occurred";
-  console.error(`Error: ${message}`);
   return new Response(JSON.stringify({ error: message }), {
     status,
     headers: HTTP_HEADERS.JSON,
@@ -61,29 +59,30 @@ export async function GET(
   { params }: { params: Params },
 ): Promise<Response> {
   const startTime = performance.now();
+  const { id } = await params;
+  //const id = request.headers.get("x-chunk-id") || "0";
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-  const { id } = await params;
-  try {
-    if (!id || activeRequests.has(id))
-      throw new Error("Invalid or duplicate request");
-    activeRequests.add(id);
 
+  try {
     const stream = new ReadableStream({
-      async start(controller) {
+      async pull(controller) {
         try {
           const chunk = await new Promise<Uint8Array>((resolve) => {
             queueMicrotask(() =>
               resolve(
-                createChunk(parseInt(id.split("-")[1] || "0", 10), CHUNK_SIZE),
+                createChunk(
+                  parseInt(id.split("-")[1] || "0", 10),
+                  DOWNLOAD_CHUNK_SIZE,
+                ),
               ),
             );
           });
           controller.enqueue(chunk);
+          controller.close();
         } catch (error) {
           controller.error(error);
-        } finally {
-          controller.close();
         }
       },
       cancel() {
@@ -91,19 +90,16 @@ export async function GET(
       },
     });
 
-    const duration = performance.now() - startTime;
     return new Response(stream, {
       headers: {
         ...HTTP_HEADERS.BINARY,
-        "X-Response-Time": `${duration.toFixed(2)}ms`,
+        "X-Response-Time": `${(performance.now() - startTime).toFixed(2)}ms`,
         "X-Request-ID": id,
       },
     });
   } catch (error) {
     clearTimeout(timeoutId);
     return createErrorResponse(error);
-  } finally {
-    activeRequests.delete(id!);
   }
 }
 
@@ -113,55 +109,60 @@ export async function POST(request: Request): Promise<Response> {
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
   try {
-    if (!request.body) throw new Error("Request body is missing");
+    // Quick header validation only
+    const { contentLength, chunkId } = validateHeaders(request.headers);
 
-    const contentLength = request.headers.get("content-length");
-    const chunkId = request.headers.get("x-chunk-id");
-
-    if (!contentLength || !chunkId) {
-      throw new Error("Missing required headers");
+    //const size = parseInt(contentLength);
+    if (!isFinite(contentLength) || contentLength > UPLOAD_CHUNK_SIZE * 2) {
+      throw new Error("Invalid content length");
     }
 
-    const size = parseInt(contentLength);
-    if (size > CHUNK_SIZE * 2) {
-      throw new Error("Request too large");
-    }
-
-    let bytesRead = 0;
-    const reader = request.body.getReader();
+    // Fast stream processing without buffering
+    const reader = request.body?.getReader();
+    if (!reader) throw new Error("No request body");
 
     try {
       while (!controller.signal.aborted) {
-        const { done, value } = await reader.read();
+        const { done } = await reader.read();
         if (done) break;
-
-        if (value) {
-          bytesRead += value.length;
-          if (bytesRead > size) {
-            throw new Error("Upload size mismatch");
-          }
-        }
       }
     } finally {
       reader.releaseLock();
     }
 
-    const duration = performance.now() - startTime;
-    return new Response(
-      JSON.stringify({
-        success: true,
-        bytesReceived: bytesRead,
-        duration: duration.toFixed(2),
-      }),
-      {
-        headers: {
-          ...HTTP_HEADERS.JSON,
-          "X-Response-Time": `${duration.toFixed(2)}ms`,
-        },
+    clearTimeout(timeoutId);
+
+    // Minimal response
+    return new Response(JSON.stringify({ chunkId }), {
+      status: 200,
+      headers: {
+        ...HTTP_HEADERS.JSON,
+        "Cache-Control": "no-store",
+        "X-Response-Time": `${(performance.now() - startTime).toFixed(2)}ms`,
+        "X-Request-ID": chunkId,
       },
-    );
+    });
   } catch (error) {
     clearTimeout(timeoutId);
     return createErrorResponse(error);
   }
+}
+
+function validateHeaders(headers: Headers): {
+  contentLength: number;
+  chunkId: string;
+} {
+  const contentLength = headers.get("content-length");
+  const chunkId = headers.get("x-chunk-id");
+
+  if (!contentLength || !chunkId) {
+    throw new Error("Missing required headers");
+  }
+
+  const size = parseInt(contentLength);
+  if (!isFinite(size) || size > UPLOAD_CHUNK_SIZE * 2) {
+    throw new Error("Invalid content length");
+  }
+
+  return { contentLength: size, chunkId };
 }

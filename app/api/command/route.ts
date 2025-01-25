@@ -13,6 +13,7 @@ const ALLOWED_COMMANDS = new Set([
   "mtr",
   "mtr6",
   "livemtr",
+  "livemtr6",
 ]);
 const COMMAND_OPTIONS: { [key: string]: string } = {
   ping: "-c4 -w15",
@@ -21,15 +22,17 @@ const COMMAND_OPTIONS: { [key: string]: string } = {
   mtr: "-rnz4",
   mtr6: "-rnz6",
   livemtr: "-ln4",
+  livemtr6: "-ln6",
 };
 
-async function getSystemInfo() {
+async function getSystemInfo(ip6: boolean = false) {
   try {
     const hostname = await execAsync("hostname -s");
     const ipInfo = await execAsync("hostname -I");
+
     return {
       hostname: hostname.stdout.trim(),
-      ips: ipInfo.stdout.trim().split(" ").filter(Boolean),
+      ips: !ip6 ? [ipInfo.stdout.split(" ")[0]] : [ipInfo.stdout.split(" ")[1]],
     };
   } catch (error) {
     console.error("Error getting system info:", error);
@@ -43,7 +46,7 @@ export async function POST(req: Request) {
   if (!targetHost || !command || !ALLOWED_COMMANDS.has(command)) {
     return new Response("Invalid target host or command", { status: 400 });
   }
-  
+
   // Handle other commands
   const options = COMMAND_OPTIONS[command as keyof typeof COMMAND_OPTIONS];
   let fullCommand;
@@ -67,6 +70,9 @@ export async function POST(req: Request) {
     case "livemtr":
       fullCommand = `mtr ${options} ${targetHost}`;
       break;
+    case "livemtr6":
+      fullCommand = `mtr ${options} ${targetHost}`;
+      break;
     case "mtr6":
       fullCommand = `mtr ${options} ${targetHost}`;
       break;
@@ -76,13 +82,17 @@ export async function POST(req: Request) {
     return new Response("Invalid command", { status: 400 });
   }
 
-  const sysInfo = command === "livemtr" ? await getSystemInfo() : null;
+  const sysInfo = command.startsWith("livemtr")
+    ? await getSystemInfo("livemtr6" === command)
+    : null;
+
+  //console.log(sysInfo?.hostname, sysInfo?.ips);
 
   const response = new NextResponse(
     new ReadableStream({
       start(controller) {
         try {
-          if (command === "livemtr") {
+          if (command.startsWith("livemtr")) {
             // Send system info first
             controller.enqueue(
               `data: ${JSON.stringify({
