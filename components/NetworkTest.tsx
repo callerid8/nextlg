@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import Link from "next/link";
 import { useForm, Controller } from "react-hook-form";
 import * as z from "zod";
@@ -104,12 +104,6 @@ function expandIPv6(address: string): string {
         .toLowerCase();
 }
 
-function expandIPv6ToNibbles(address: string): string {
-    const expanded = expandIPv6(address);
-    return expanded.replace(/:/g, '');
-}
-
-
 // Utility Functions
 const handleHostLine = async (
     currentRow: MtrData,
@@ -130,7 +124,7 @@ const handleHostLine = async (
 
     if (host.includes(':')) {
         // Handle IPv6 address with proper expansion
-        const expandedNibbles = expandIPv6ToNibbles(host);
+        const expandedNibbles = expandIPv6(host);
 
         if (expandedNibbles.length !== 32) {
             return;
@@ -220,7 +214,7 @@ const createDefaultMtrRow = ((hop: number): MtrData => ({
 
 export function NetworkTest() {
     const [output, setOutput] = useState<string>("");
-    const [mtrHead, setMtrHead] = useState<MtrHead[]>([]);
+    const [mtrHead, setMtrHead] = useState<MtrHead>();
     const [mtrDataArray, setMtrDataArray] = useState<MtrData[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string>("");
@@ -237,13 +231,68 @@ export function NetworkTest() {
     const file3Url = process.env.NEXT_PUBLIC_FILE3_URL || "/api/download/250mb";
     const file3Size = process.env.NEXT_PUBLIC_FILE3_SIZE || "250MB";
 
-    const { control, handleSubmit, formState: { errors } } = useForm<FormValues>({
+    // Add new state for available commands
+    const [availableCommands, setAvailableCommands] = useState<FormValues['command'][]>([
+        "ping", "host", "mtr", "livemtr", "livemtr6", "ping6", "mtr6"
+    ]);
+
+    // Form setup needs to come before any hooks that use its methods
+    const { control, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
         defaultValues: {
             targetHost: "",
             command: "ping",
         },
         resolver: zodResolver(formSchema),
     });
+
+    // Add input type detection
+    const detectInputType = useCallback((input: string) => {
+        const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+        const ipv6Regex = /^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,7}:|^([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}$|^([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}$|^([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}$|^([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})$|^:((:[0-9a-fA-F]{1,4}){1,7}|:)$/;
+
+        if (ipv4Regex.test(input)) return 'ipv4';
+        if (ipv6Regex.test(input)) return 'ipv6';
+        return 'host';
+    }, []);
+
+    // Update commands based on input type with memoized function
+    const updateAvailableCommands = useCallback((input: string) => {
+        const type = detectInputType(input);
+        const baseCommands: FormValues['command'][] = ["host"];
+        let newCommands: FormValues['command'][];
+
+        switch (type) {
+            case 'ipv4':
+                newCommands = [...baseCommands, "mtr", "livemtr", "ping"];
+                break;
+            case 'ipv6':
+                newCommands = [...baseCommands, "mtr6", "livemtr6", "ping6"];
+                break;
+            default:
+                newCommands = [
+                    ...baseCommands,
+                    "mtr", "livemtr", "mtr6",
+                    "livemtr6", "ping", "ping6",
+                ];
+        }
+
+        setAvailableCommands(newCommands);
+
+        const currentCommand = watch('command');
+        if (!newCommands.includes(currentCommand)) {
+            setValue('command', type === 'ipv6' ? 'ping6' : 'ping');
+        }
+    }, [detectInputType, watch, setValue]);
+
+    // Single effect to handle input changes
+    useEffect(() => {
+        const subscription = watch((value, { name }) => {
+            if (name === 'targetHost') {
+                updateAvailableCommands(value.targetHost || '');
+            }
+        });
+        return () => subscription.unsubscribe();
+    }, [watch, updateAvailableCommands]);
 
     // Memoize the stats calculation
     const calculateStats = useCallback((pings: number[]) => {
@@ -300,7 +349,7 @@ export function NetworkTest() {
     // Memoize the ASN fetch
     const fetchASN = useCallback(async (reversedHost: string, cacheKey: string, currentRow: MtrData) => {
         try {
-            let queryHost = cacheKey.startsWith('asn6_')
+            const queryHost = cacheKey.startsWith('asn6_')
                 ? `${reversedHost}.origin6.asn.cymru.com`
                 : `${reversedHost}.origin.asn.cymru.com`;
 
@@ -327,7 +376,7 @@ export function NetworkTest() {
                     timestamp: Date.now()
                 }));
             }
-        } catch (error) {
+        } catch {
             // Silently handle errors
         }
     }, []);
@@ -394,7 +443,7 @@ export function NetworkTest() {
                     if (command.startsWith("livemtr")) {
                         const data = JSON.parse(line);
                         if (data.type === "system_info") {
-                            setMtrHead([{ hostname: data.hostname, ips: data.ips }]);
+                            setMtrHead({ hostname: data.hostname, ips: data.ips });
                         } else if (data.output !== undefined) {
                             setMtrDataArray(prev => parseMtrLine(data.output, prev));
                         }
@@ -475,9 +524,9 @@ export function NetworkTest() {
                             control={control}
                             render={({ field }) => (
                                 <Input
+                                    {...field}
                                     type="text"
                                     placeholder="Enter target host (IP or domain)"
-                                    {...field}
                                     className="w-full flex-1 text-sm md:text-md"
                                     disabled={isLoading}
                                     aria-invalid={!!errors.targetHost}
@@ -501,13 +550,14 @@ export function NetworkTest() {
                                         <SelectValue placeholder="Select command" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        <SelectItem value="host">host</SelectItem>
-                                        <SelectItem value="mtr">mtr</SelectItem>
-                                        <SelectItem value="livemtr">mtr (live)</SelectItem>
-                                        {ipv6Address && (<SelectItem value="mtr6">mtr -6</SelectItem>)}
-                                        {ipv6Address && (<SelectItem value="livemtr6">mtr -6 (live)</SelectItem>)}
-                                        <SelectItem value="ping">ping</SelectItem>
-                                        {ipv6Address && (<SelectItem value="ping6">ping -6</SelectItem>)}
+                                        {availableCommands.map(cmd => (
+                                            <SelectItem key={cmd} value={cmd}>
+                                                {cmd === "livemtr" ? "mtr (live)" :
+                                                    cmd === "livemtr6" ? "mtr -6 (live)" :
+                                                        cmd === "mtr6" ? "mtr -6" :
+                                                            cmd === "ping6" ? "ping -6" : cmd}
+                                            </SelectItem>
+                                        ))}
                                     </SelectContent>
                                 </Select>
                             )}
@@ -548,7 +598,7 @@ export function NetworkTest() {
                     <div className="w-full overflow-x-auto">
                         <MtrTable
                             data={sortedMtrData}
-                            sourceInfo={mtrHead[0]}
+                            sourceInfo={mtrHead}
                             target={control._formValues.targetHost}
                         />
                     </div>

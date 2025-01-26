@@ -73,11 +73,6 @@ function expandIPv6(address: string): string {
         .toLowerCase();
 }
 
-function expandIPv6ToNibbles(address: string): string {
-    const expanded = expandIPv6(address);
-    return expanded;
-}
-
 // Add helper function for timestamp
 function getFormattedTimestamp() {
     return new Intl.DateTimeFormat('en-US', {
@@ -120,22 +115,19 @@ const resolveDns = async (
             if (Date.now() - timestamp < LOCALSTORAGE_CACHE_DURATION) {
                 return value;
             }
-        } catch (error) {
+        } catch {
             // Cache invalid or expired, continue to fetch
         }
     }
 
     try {
         let query = target;
-
         if (isIp) {
             if (ipInfo.version === 4) {
                 query = target.split(".").reverse().join(".") + ".in-addr.arpa";
             } else if (ipInfo.version === 6) {
-                const expandedNibbles = expandIPv6ToNibbles(target);
-                if (expandedNibbles.length !== 32) {
-                    return null;
-                }
+                const expandedNibbles = expandIPv6(target);
+                if (expandedNibbles.length !== 32) return null;
                 query = expandedNibbles
                     .split('')
                     .reverse()
@@ -156,7 +148,7 @@ const resolveDns = async (
             return result;
         }
         return null;
-    } catch (error) {
+    } catch {
         return null;
     }
 }
@@ -189,13 +181,11 @@ export const MtrTable = memo(({ data, sourceInfo, target }: MtrTableProps) => {
 
     useEffect(() => {
         if (target) {
-            const { isIp, version } = isIPAddress(target);
-
+            const { isIp } = isIPAddress(target);
             resolveDns(target, isIp, sourceInfo?.ips)
-                .then(result => {
-                    setResolvedTarget(result);
-                })
-                .catch(error => {
+                .then(setResolvedTarget)
+                .catch(() => {
+                    // Silently handle errors
                 });
         }
     }, [target, sourceInfo]);
