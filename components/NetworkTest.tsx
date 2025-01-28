@@ -23,6 +23,8 @@ import {
     CardFooter, CardHeader, CardTitle
 } from "@/components/ui/card";
 import { MtrTable } from "@/components/MtrTable";
+import { expandIPv6, DNS_API_URL, LOCALSTORAGE_CACHE_DURATION } from "@/utils/network"; // Utility function to expand IPv6 addresses
+import type { MtrData } from "@/types/network"; // Type definitions moved to a separate file
 
 // Types and Interfaces
 interface MtrHead {
@@ -30,26 +32,7 @@ interface MtrHead {
     ips: string[];
 }
 
-interface MtrData {
-    Hop: number;
-    ASN: string;
-    Prefix: string;
-    Host: string;
-    SentPackets: number[];
-    ReceivedPackets: number[];
-    Pings: number[];
-    Last: number;
-    Best: number;
-    Worst: number;
-    Avg: number;
-    StDev: number;
-    LossPercent: number;
-    isHidden: boolean;
-}
-
 // Constants
-const LOCALSTORAGE_CACHE_DURATION = 12 * 60 * 60 * 1000;
-const DNS_API_URL = "https://dns.google/resolve";
 const MAX_PACKETS = 100;
 const reservedIPv4Regex = /^(?:0\.0\.0\.|10\.(?:[0-9]{1,2}\.){2}|100\.(?:6[4-9]|7[0-9]|8[0-9]|9[0-9])\.(?:[0-9]{1,2}\.)|127\.(?:[0-9]{1,2}\.){2}|169\.254\.(?:[0-9]{1,2}\.)|172\.(?:1[6-9]|2[0-9]|3[0-1])\.(?:[0-9]{1,2}\.)|192\.(?:0\.0\.|0\.2\.|168\.)|198\.(?:1[8-9]\.|51\.(?:100\.))|203\.0\.113\.|2(?:2[4-9]|3[0-9])\.(?:[0-9]{1,2}\.){2}|240\.(?:[0-9]{1,2}\.){3}|255\.255\.255\.255)$/;
 const reservedIPv6Regex = /^(?::|fe80:|fc00:|fd00:|::1$)/i;
@@ -67,42 +50,6 @@ const formSchema = z.object({
 });
 
 type FormValues = z.infer<typeof formSchema>;
-
-// Utility function to normalize IPv6 address
-function expandIPv6(address: string): string {
-    // Handle special case of ::
-    if (address === '::') {
-        return '0000:0000:0000:0000:0000:0000:0000:0000';
-    }
-
-    // Handle starting/ending ::
-    let expanded = address;
-    if (expanded.startsWith('::')) expanded = '0' + expanded;
-    if (expanded.endsWith('::')) expanded = expanded + '0';
-
-    // Count number of groups and colons
-    const groups = expanded.split(':');
-    const doubleColonIndex = groups.indexOf('');
-
-    // Handle compressed zeros (::)
-    if (doubleColonIndex !== -1) {
-        // Remove empty element
-        groups.splice(doubleColonIndex, 1);
-
-        // Calculate missing groups
-        const missing = 8 - groups.length;
-
-        // Insert required number of zero groups
-        const zeros = Array(missing).fill('0000');
-        groups.splice(doubleColonIndex, 0, ...zeros);
-    }
-
-    // Ensure each group is 4 characters
-    return groups
-        .map(g => g.padStart(4, '0'))
-        .join('')
-        .toLowerCase();
-}
 
 // Utility Functions
 const handleHostLine = async (
@@ -124,14 +71,14 @@ const handleHostLine = async (
 
     if (host.includes(':')) {
         // Handle IPv6 address with proper expansion
-        const expandedNibbles = expandIPv6(host);
+        const expanded = expandIPv6(host);
 
-        if (expandedNibbles.length !== 32) {
+        if (expanded.length !== 32) {
             return;
         }
 
         // Properly format for ASN lookup
-        reversedHost = expandedNibbles
+        reversedHost = expanded
             .split('')
             .reverse()
             .join('.');

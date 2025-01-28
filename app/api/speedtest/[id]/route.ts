@@ -14,22 +14,6 @@ const HTTP_HEADERS = {
 
 type Params = Promise<{ id: string }>;
 
-/*function createChunk(idNumber: number, chunkSize: number): Uint8Array {
-  const result = new Uint8Array(chunkSize);
-  const pattern = (idNumber & 0xffff) | ((idNumber & 0xff) << 16);
-
-  for (let i = 0; i < chunkSize / 4; i++) {
-    const value = pattern + i;
-    // Little-endian byte order
-    result[i * 4] = value & 0xff;
-    result[i * 4 + 1] = (value >> 8) & 0xff;
-    result[i * 4 + 2] = (value >> 16) & 0xff;
-    result[i * 4 + 3] = (value >> 24) & 0xff;
-  }
-
-  return result;
-}*/
-
 function createChunk(idNumber: number, chunkSize: number): Uint8Array {
   const result = new Uint8Array(chunkSize);
   const view = new DataView(result.buffer);
@@ -60,25 +44,16 @@ export async function GET(
 ): Promise<Response> {
   const startTime = performance.now();
   const { id } = await params;
-  //const id = request.headers.get("x-chunk-id") || "0";
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
   try {
     const stream = new ReadableStream({
-      async pull(controller) {
+      async start(controller) {
         try {
-          const chunk = await new Promise<Uint8Array>((resolve) => {
-            queueMicrotask(() =>
-              resolve(
-                createChunk(
-                  parseInt(id.split("-")[1] || "0", 10),
-                  DOWNLOAD_CHUNK_SIZE,
-                ),
-              ),
-            );
-          });
+          const chunkId = parseInt(id.split("-")[1] || "0", 10);
+          const chunk = createChunk(chunkId, DOWNLOAD_CHUNK_SIZE);
           controller.enqueue(chunk);
           controller.close();
         } catch (error) {
@@ -109,15 +84,14 @@ export async function POST(request: Request): Promise<Response> {
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
   try {
-    // Quick header validation only
+    // Validate headers
     const { contentLength, chunkId } = validateHeaders(request.headers);
 
-    //const size = parseInt(contentLength);
     if (!isFinite(contentLength) || contentLength > UPLOAD_CHUNK_SIZE * 2) {
       throw new Error("Invalid content length");
     }
 
-    // Fast stream processing without buffering
+    // Process the stream
     const reader = request.body?.getReader();
     if (!reader) throw new Error("No request body");
 
@@ -132,7 +106,7 @@ export async function POST(request: Request): Promise<Response> {
 
     clearTimeout(timeoutId);
 
-    // Minimal response
+    // Return success response
     return new Response(JSON.stringify({ chunkId }), {
       status: 200,
       headers: {
@@ -156,11 +130,11 @@ function validateHeaders(headers: Headers): {
   const chunkId = headers.get("x-chunk-id");
 
   if (!contentLength || !chunkId) {
-    throw new Error("Missing required headers");
+    throw new Error("Missing required headers: content-length and x-chunk-id");
   }
 
   const size = parseInt(contentLength);
-  if (!isFinite(size) || size > UPLOAD_CHUNK_SIZE * 2) {
+  if (!isFinite(size) || size <= 0 || size > UPLOAD_CHUNK_SIZE * 2) {
     throw new Error("Invalid content length");
   }
 
