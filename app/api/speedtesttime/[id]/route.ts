@@ -1,5 +1,5 @@
-const DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
-const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 2MB chunks
+//const DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 
 const HTTP_HEADERS = {
@@ -14,7 +14,12 @@ const HTTP_HEADERS = {
 
 type Params = Promise<{ id: string }>;
 
-function createChunk(idNumber: number, chunkSize: number): Uint8Array {
+function createChunk(idNumber: number, requestedSize: number): Uint8Array {
+  const chunkSize = Math.min(
+    Math.max(256 * 1024, requestedSize), // minimum 256KB
+    8 * 1024 * 1024, // maximum 8MB
+  );
+
   const result = new Uint8Array(chunkSize);
   const view = new DataView(result.buffer);
 
@@ -44,6 +49,8 @@ export async function GET(
 ): Promise<Response> {
   const startTime = performance.now();
   const { id } = await params;
+  const url = new URL(request.url);
+  const requestedSize = parseInt(url.searchParams.get("size") || "1048576", 10);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
@@ -53,7 +60,7 @@ export async function GET(
       async start(controller) {
         try {
           const chunkId = parseInt(id.split("-")[1] || "0", 10);
-          const chunk = createChunk(chunkId, DOWNLOAD_CHUNK_SIZE);
+          const chunk = createChunk(chunkId, requestedSize);
           controller.enqueue(chunk);
           controller.close();
         } catch (error) {

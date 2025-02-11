@@ -1,10 +1,16 @@
 "use client";
 
+// React and Next.js imports
 import { useState, useCallback, useMemo, useEffect } from "react";
 import Link from "next/link";
+
+// Third-party imports
 import { useForm, Controller } from "react-hook-form";
 import * as z from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { AlertCircle } from "lucide-react";
+
+// Local components
 import LoadingSpinner from "@/components/LoadingSpinner";
 import { Input } from "@/components/ui/input";
 import {
@@ -16,15 +22,16 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertCircle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
     Card, CardContent, CardDescription,
     CardFooter, CardHeader, CardTitle
 } from "@/components/ui/card";
 import { MtrTable } from "@/components/MtrTable";
-import { expandIPv6, DNS_API_URL, LOCALSTORAGE_CACHE_DURATION } from "@/utils/network"; // Utility function to expand IPv6 addresses
-import type { MtrData } from "@/types/network"; // Type definitions moved to a separate file
+
+// Utils and types
+import { expandIPv6, DNS_API_URL, LOCALSTORAGE_CACHE_DURATION } from "@/utils/network";
+import type { MtrData } from "@/types/network";
 
 // Types and Interfaces
 interface MtrHead {
@@ -37,6 +44,19 @@ const MAX_PACKETS = 100;
 const reservedIPv4Regex = /^(?:0\.0\.0\.|10\.(?:[0-9]{1,2}\.){2}|100\.(?:6[4-9]|7[0-9]|8[0-9]|9[0-9])\.(?:[0-9]{1,2}\.)|127\.(?:[0-9]{1,2}\.){2}|169\.254\.(?:[0-9]{1,2}\.)|172\.(?:1[6-9]|2[0-9]|3[0-1])\.(?:[0-9]{1,2}\.)|192\.(?:0\.0\.|0\.2\.|168\.)|198\.(?:1[8-9]\.|51\.(?:100\.))|203\.0\.113\.|2(?:2[4-9]|3[0-9])\.(?:[0-9]{1,2}\.){2}|240\.(?:[0-9]{1,2}\.){3}|255\.255\.255\.255)$/;
 const reservedIPv6Regex = /^(?::|fe80:|fc00:|fd00:|::1$)/i;
 
+// Environment variables
+/*const ENV = {
+    ipv4Address: process.env.NEXT_PUBLIC_IPV4_ADDRESS || "127.0.0.1",
+    ipv6Address: process.env.NEXT_PUBLIC_IPV6_ADDRESS || "::1",
+    file1Url: process.env.NEXT_PUBLIC_FILE1_URL || "/api/download/10mb",
+    file1Size: process.env.NEXT_PUBLIC_FILE1_SIZE || "10MB",
+    file2Url: process.env.NEXT_PUBLIC_FILE2_URL || "/api/download/100mb",
+    file2Size: process.env.NEXT_PUBLIC_FILE2_SIZE || "100MB",
+    file3Url: process.env.NEXT_PUBLIC_FILE3_URL || "/api/download/250mb",
+    file3Size: process.env.NEXT_PUBLIC_FILE3_SIZE || "250MB",
+};*/
+
+// Form Schema
 const formSchema = z.object({
     targetHost: z.string()
         .min(1, "Target host is required")
@@ -52,6 +72,23 @@ const formSchema = z.object({
 type FormValues = z.infer<typeof formSchema>;
 
 // Utility Functions
+const createDefaultMtrRow = ((hop: number): MtrData => ({
+    Hop: hop,
+    ASN: "N/A",
+    Prefix: "N/A",
+    Host: "N/A",
+    SentPackets: [],
+    ReceivedPackets: [],
+    Pings: [],
+    Last: Infinity,
+    Best: Infinity,
+    Worst: -Infinity,
+    Avg: 0,
+    StDev: 0,
+    LossPercent: 0,
+    isHidden: false,
+}));
+
 const handleHostLine = async (
     currentRow: MtrData,
     prevRow: MtrData | undefined,
@@ -142,29 +179,13 @@ const handleSentPacketLine = (
     }
 };
 
-const createDefaultMtrRow = ((hop: number): MtrData => ({
-    Hop: hop,
-    ASN: "N/A",
-    Prefix: "N/A",
-    Host: "N/A",
-    SentPackets: [],
-    ReceivedPackets: [],
-    Pings: [],
-    Last: Infinity,
-    Best: Infinity,
-    Worst: -Infinity,
-    Avg: 0,
-    StDev: 0,
-    LossPercent: 0,
-    isHidden: false,
-}));
-
 export function NetworkTest() {
     const [output, setOutput] = useState<string>("");
     const [mtrHead, setMtrHead] = useState<MtrHead>();
     const [mtrDataArray, setMtrDataArray] = useState<MtrData[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string>("");
+    const [targetHost, setTargetHost] = useState("");
     //const [clearError] = useState(() => () => setError(""));
 
     const ipv4Address = process.env.NEXT_PUBLIC_IPV4_ADDRESS || "127.0.0.1";
@@ -415,6 +436,7 @@ export function NetworkTest() {
         setMtrDataArray([]);
         setIsLoading(true);
         setError("");
+        setTargetHost(values.targetHost);
 
         try {
             const response = await fetch("/api/command", {
@@ -546,7 +568,7 @@ export function NetworkTest() {
                         <MtrTable
                             data={sortedMtrData}
                             sourceInfo={mtrHead}
-                            target={control._formValues.targetHost}
+                            target={targetHost}
                         />
                     </div>
                 )}

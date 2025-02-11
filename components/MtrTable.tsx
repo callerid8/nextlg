@@ -1,10 +1,9 @@
-import { memo, useState, useEffect } from "react";
+import { memo, useState } from "react";
 import Link from "next/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { isIPAddress, getFormattedTimestamp, resolveDns } from "@/utils/network"; // Utility functions moved to a separate file
+import { getFormattedTimestamp } from "@/utils/network"; // Utility functions moved to a separate file
 import type { MtrTableProps } from "@/types/network"; // Type definitions moved to a separate file]
-
 
 // Tooltip Cell Component
 const TableCellWithTooltip = ({ label, content, href }: { label: string; content: string; href?: string }) => (
@@ -35,28 +34,6 @@ const TableCellWithTooltip = ({ label, content, href }: { label: string; content
 // Main Component
 export const MtrTable = memo(({ data, sourceInfo, target }: MtrTableProps) => {
     const [startTime] = useState(getFormattedTimestamp());
-    const [resolvedTarget, setResolvedTarget] = useState<string | null>(null);
-    const [isLoading, setIsLoading] = useState(false);
-
-    useEffect(() => {
-        const resolveTarget = async () => {
-            if (!target) return;
-
-            setIsLoading(true);
-            try {
-                const { isIp } = isIPAddress(target);
-                const resolved = await resolveDns(target, isIp, sourceInfo?.ips);
-                setResolvedTarget(resolved);
-            } catch (error) {
-                console.error("Failed to resolve DNS:", error);
-                setResolvedTarget(null);
-            } finally {
-                setIsLoading(false);
-            }
-        };
-
-        resolveTarget();
-    }, [target, sourceInfo]);
 
     return (
         <Table className="text-xs font-mono">
@@ -69,8 +46,7 @@ export const MtrTable = memo(({ data, sourceInfo, target }: MtrTableProps) => {
                         <TableRow>
                             <TableCell colSpan={10}>
                                 {sourceInfo.hostname} ({sourceInfo.ips?.[0] || "unknown"}) -&gt; {target}
-                                {resolvedTarget && ` (${resolvedTarget})`}
-                                {isLoading && " (resolving...)"}
+
                             </TableCell>
                         </TableRow>
                     </>

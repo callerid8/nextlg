@@ -14,13 +14,6 @@ import {
     CardTitle
 } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-    Select,
-    SelectTrigger,
-    SelectValue,
-    SelectContent,
-    SelectItem
-} from "@/components/ui/select";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import { AlertCircle } from "lucide-react";
 
@@ -28,6 +21,8 @@ import { AlertCircle } from "lucide-react";
 interface SpeedTestResults {
     downloadSpeed: number;
     uploadSpeed: number;
+    currentDownloadSpeed?: number;
+    currentUploadSpeed?: number;
 }
 
 interface TestMetrics {
@@ -37,30 +32,15 @@ interface TestMetrics {
 }
 
 // Constants
-const DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
-const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;   // 2MB chunks
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB base chunk size
+const MIN_CHUNK_SIZE = 256 * 1024;  // 256KB minimum
+const MAX_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB maximum
+const INITIAL_CHUNK_SIZE = 2 * 1024 * 1024; // Start with 2MB chunks
 const CONCURRENT_REQUESTS = 8;
 const MAX_RETRIES = 3;
 const TEST_TIMEOUT = 60000; // 1 minute timeout
-const UPLOAD_CHUNK_POOL_SIZE = 4; // Number of reusable chunks for upload
-
-const TEST_SIZES = {
-    SMALL: {
-        download: 16 * 1024 * 1024,  // 16MB
-        upload: 8 * 1024 * 1024,     // 8MB
-        label: 'Small (16MB ↓, 8MB ↑)'
-    },
-    MEDIUM: {
-        download: 64 * 1024 * 1024,  // 64MB
-        upload: 16 * 1024 * 1024,    // 16MB
-        label: 'Medium (64MB ↓, 16MB ↑)'
-    },
-    LARGE: {
-        download: 128 * 1024 * 1024, // 128MB
-        upload: 32 * 1024 * 1024,    // 32MB
-        label: 'Large (128MB ↓, 32MB ↑)'
-    }
-} as const;
+const TEST_DURATION = 5000; // 5 seconds per test
+const UPLOAD_CHUNK_POOL_SIZE = 4;
 
 // Utility Functions
 const clearCache = async () => {
@@ -68,16 +48,6 @@ const clearCache = async () => {
         const cacheNames = await caches.keys();
         await Promise.all(cacheNames.map(name => caches.delete(name)));
     }
-};
-
-const preGenerateUploadChunks = (
-    testSize: typeof TEST_SIZES[keyof typeof TEST_SIZES],
-    createChunk: (chunkId: number, size: number) => Uint8Array
-): Uint8Array[] => {
-    const totalUploadChunks = Math.ceil(testSize.upload / UPLOAD_CHUNK_SIZE);
-    return Array.from({ length: totalUploadChunks }, (_, chunkId) =>
-        createChunk(chunkId, UPLOAD_CHUNK_SIZE)
-    );
 };
 
 // Main Component
@@ -88,7 +58,6 @@ export function Speedtest() {
     const [progress, setProgress] = useState(0);
     const [currentTest, setCurrentTest] = useState<"download" | "upload" | null>(null);
     const [results, setResults] = useState<SpeedTestResults | null>(null);
-    const [testSize, setTestSize] = useState(TEST_SIZES.MEDIUM);
     const [timeoutId, setTimeoutId] = useState<NodeJS.Timeout | null>(null);
     const [detailedError, setDetailedError] = useState<{
         type: 'network' | 'timeout' | 'unknown';
@@ -211,24 +180,56 @@ export function Speedtest() {
             lastProgress: 0
         };
 
-        const size = isUpload ? testSize.upload : testSize.download;
-        const chunkSize = isUpload ? UPLOAD_CHUNK_SIZE : DOWNLOAD_CHUNK_SIZE;
-        const totalChunks = Math.ceil(size / chunkSize);
+        let chunkSize = INITIAL_CHUNK_SIZE;
         let completedChunks = 0;
         const activePromises = new Set();
-        const chunkQueue = Array.from({ length: totalChunks }, (_, i) => i);
+        const testEndTime = performance.now() + TEST_DURATION;
+
+        let lastSpeedUpdate = performance.now();
+        let lastBytes = 0;
 
         const updateProgress = () => {
-            setProgress((completedChunks / totalChunks) * 100);
+            const elapsed = performance.now() - testMetrics.current.startTime;
+            setProgress((elapsed / TEST_DURATION) * 100);
+
+            // Update current speed every 200ms
+            const now = performance.now();
+            if (now - lastSpeedUpdate >= 200) {
+                const bytesInInterval = testMetrics.current.bytesTransferred - lastBytes;
+                const intervalInSeconds = (now - lastSpeedUpdate) / 1000;
+                const currentSpeed = (bytesInInterval * 8) / (1024 * 1024 * intervalInSeconds);
+
+                setResults(prev => ({
+                    ...prev || { downloadSpeed: 0, uploadSpeed: 0 },
+                    ...(isUpload
+                        ? { currentUploadSpeed: currentSpeed }
+                        : { currentDownloadSpeed: currentSpeed }
+                    )
+                }));
+
+                lastSpeedUpdate = now;
+                lastBytes = testMetrics.current.bytesTransferred;
+            }
         };
 
-        while (chunkQueue.length > 0 || activePromises.size > 0) {
-            while (chunkQueue.length > 0 && activePromises.size < CONCURRENT_REQUESTS) {
-                const chunkId = chunkQueue.shift()!;
+        // Dynamic chunk size adjustment
+        const adjustChunkSize = (duration: number) => {
+            const targetDuration = 200; // Aim for 200ms per chunk
+            const ratio = targetDuration / duration;
+            const newSize = Math.floor(chunkSize * ratio);
+            return Math.max(MIN_CHUNK_SIZE, Math.min(MAX_CHUNK_SIZE, newSize));
+        };
+
+        while (performance.now() < testEndTime) {
+            while (activePromises.size < CONCURRENT_REQUESTS && performance.now() < testEndTime) {
+                const chunkStartTime = performance.now();
+                const chunkId = completedChunks++;
+
                 const promise = chunkHandler(chunkId)
                     .then(() => {
-                        completedChunks++;
+                        const chunkDuration = performance.now() - chunkStartTime;
                         testMetrics.current.bytesTransferred += chunkSize;
+                        chunkSize = adjustChunkSize(chunkDuration);
                         updateProgress();
                         activePromises.delete(promise);
                     })
@@ -249,8 +250,16 @@ export function Speedtest() {
         setProgress(100);
 
         const duration = (performance.now() - testMetrics.current.startTime) / 1000;
-        return (testMetrics.current.bytesTransferred * 8) / (1024 * 1024 * duration);
-    }, [testSize]);
+        const finalSpeed = (testMetrics.current.bytesTransferred * 8) / (1024 * 1024 * duration);
+        setResults(prev => ({
+            ...prev || { downloadSpeed: 0, uploadSpeed: 0 },
+            ...(isUpload
+                ? { uploadSpeed: finalSpeed, currentUploadSpeed: undefined }
+                : { downloadSpeed: finalSpeed, currentDownloadSpeed: undefined }
+            )
+        }));
+        return finalSpeed;
+    }, []);
 
     const runDownloadTest = useCallback(async () => {
         setCurrentTest("download");
@@ -258,15 +267,19 @@ export function Speedtest() {
 
         try {
             const speed = await runTest(false, downloadChunk);
-            setResults(prev => ({
+            // Immediately show download results
+            setResults({
                 downloadSpeed: speed,
-                uploadSpeed: prev?.uploadSpeed || 0
-            }));
+                uploadSpeed: 0,
+                currentDownloadSpeed: undefined
+            });
+            return speed;
         } catch (err) {
             if (!abortControllerRef.current?.signal.aborted) {
                 setError("Download test failed. Please try again.");
                 console.error("Download test error:", err);
             }
+            throw err;
         }
     }, [runTest, downloadChunk]);
 
@@ -297,7 +310,6 @@ export function Speedtest() {
 
     const runSpeedTest = async () => {
         if (timeoutId) clearTimeout(timeoutId);
-
         abortControllerRef.current?.abort();
         abortControllerRef.current = new AbortController();
 
@@ -306,23 +318,30 @@ export function Speedtest() {
         setDetailedError(null);
         setResults(null);
 
-        await new Promise(resolve => setTimeout(resolve, 0));
-
         const newTimeoutId = setTimeout(handleTimeout, TEST_TIMEOUT);
         setTimeoutId(newTimeoutId);
 
         try {
             await clearCache();
 
-            // Pre-generate all upload chunks before starting tests
-            const preGeneratedChunks = preGenerateUploadChunks(testSize, createChunk);
+            // Pre-generate chunks for upload test
+            const preGeneratedChunks = Array.from(
+                { length: Math.ceil(TEST_DURATION / CHUNK_SIZE) },
+                (_, chunkId) => createChunk(chunkId, CHUNK_SIZE)
+            );
             chunkPool.current = preGeneratedChunks;
 
             if (chunkPool.current.length === 0) {
                 throw new Error('Failed to generate upload chunks');
             }
 
+            // Run download test and show results
             await runDownloadTest();
+
+            // Add a small delay before starting upload test
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Run upload test
             await runUploadTest();
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
@@ -346,39 +365,18 @@ export function Speedtest() {
                 <CardTitle>Speed Test</CardTitle>
                 <CardDescription className="space-y-4">
                     <div>Test your connection speed to this server</div>
-                    <div className="grid grid-rows-2 lg:grid-cols-2 lg:items-start space-y-2 md:space-y-0">
-                        <div>
-                            <Select
-                                value={JSON.stringify(testSize)}
-                                onValueChange={(value) => setTestSize(JSON.parse(value))}
-                                disabled={isLoading}
-                            >
-                                <SelectTrigger className="w-[280px]">
-                                    <SelectValue placeholder="Test Size" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value={JSON.stringify(TEST_SIZES.SMALL)}>{TEST_SIZES.SMALL.label}</SelectItem>
-                                    <SelectItem value={JSON.stringify(TEST_SIZES.MEDIUM)}>{TEST_SIZES.MEDIUM.label}</SelectItem>
-                                    <SelectItem value={JSON.stringify(TEST_SIZES.LARGE)}>{TEST_SIZES.LARGE.label}</SelectItem>
-                                </SelectContent>
-                            </Select>
-                        </div><div>
-                            <Button
-                                onClick={runSpeedTest}
-                                disabled={isLoading}
-                                className="w-full"
-                            >
-                                {isLoading ? <LoadingSpinner /> : "Run Speed Test →"}
-                            </Button>
-                        </div>
+                    <div className="flex justify-center">
+                        <Button
+                            onClick={runSpeedTest}
+                            disabled={isLoading}
+                            className="w-48"
+                        >
+                            {isLoading ? <LoadingSpinner /> : "Run Speed Test →"}
+                        </Button>
                     </div>
-
                 </CardDescription>
-
             </CardHeader>
             <CardContent className="space-y-4">
-
-
                 {error && (
                     <Alert variant="destructive">
                         <AlertCircle className="h-4 w-4" />
@@ -402,11 +400,21 @@ export function Speedtest() {
                     <div className="grid grid-cols-2 gap-2 py-2 items-center">
                         <div>
                             <p className="text-sm font-medium">Download ↓</p>
-                            <p className="text-2xl font-bold">{results.downloadSpeed.toFixed(2)} Mbps</p>
+                            <p className="text-2xl font-bold">
+                                {results.currentDownloadSpeed !== undefined
+                                    ? `${results.currentDownloadSpeed.toFixed(2)}*`
+                                    : `${results.downloadSpeed.toFixed(2)}`
+                                } Mbps
+                            </p>
                         </div>
                         <div>
                             <p className="text-sm font-medium">Upload ↑</p>
-                            <p className="text-2xl font-bold">{results.uploadSpeed.toFixed(2)} Mbps</p>
+                            <p className="text-2xl font-bold">
+                                {results.currentUploadSpeed !== undefined
+                                    ? `${results.currentUploadSpeed.toFixed(2)}*`
+                                    : `${results.uploadSpeed.toFixed(2)}`
+                                } Mbps
+                            </p>
                         </div>
                     </div>
                 )}
