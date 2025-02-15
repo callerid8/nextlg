@@ -7,7 +7,7 @@ interface testToggleProps {
   onToggle: (showSpeedTest: boolean) => void;
 }
 
-export function TestToggle({ onToggle }: testToggleProps) {
+export default function TestToggle({ onToggle }: testToggleProps) {
   const [showSpeedTest, setShowSpeedTest] = useState<boolean>(false);
 
   const handleToggle = () => {

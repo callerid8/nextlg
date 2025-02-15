@@ -1,5 +1,5 @@
 const DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
-const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024; // 2MB chunks
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 
 const HTTP_HEADERS = {

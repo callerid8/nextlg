@@ -81,7 +81,7 @@ const preGenerateUploadChunks = (
 };
 
 // Main Component
-export function Speedtest() {
+export default function Speedtest() {
     // State declarations
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string>("");

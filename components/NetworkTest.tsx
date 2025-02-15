@@ -179,7 +179,7 @@ const handleSentPacketLine = (
     }
 };
 
-export function NetworkTest() {
+export default function NetworkTest() {
     const [output, setOutput] = useState<string>("");
     const [mtrHead, setMtrHead] = useState<MtrHead>();
     const [mtrDataArray, setMtrDataArray] = useState<MtrData[]>([]);

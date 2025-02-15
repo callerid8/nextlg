@@ -16,7 +16,7 @@ const ALLOWED_COMMANDS = new Set([
   "livemtr6",
 ]);
 const COMMAND_OPTIONS: { [key: string]: string } = {
-  ping: "-c4 -w15",
+  ping: "-4 -c4 -w15",
   ping6: "-6 -c4 -w15",
   host: "",
   mtr: "-rnz4",
