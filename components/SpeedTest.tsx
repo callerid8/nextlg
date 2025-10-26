@@ -162,17 +162,26 @@ export default function Speedtest() {
     const uploadChunk = useCallback(async (chunkId: number, retryCount = 0): Promise<void> => {
         let chunk: Uint8Array | undefined;
         try {
-            // Use the pre-generated chunk from the pool
+            /* ------------------------------------------------------------------
+             * Grab a reusable chunk from the pool.
+             * ------------------------------------------------------------------ */
             chunk = chunkPool.current.shift();
-            if (!chunk) {
-                throw new Error('No chunks available for upload');
-            }
+            if (!chunk) throw new Error('No chunks available for upload');
 
             const uniqueId = `${Date.now()}-${chunkId}`;
 
+            /* ------------------------------------------------------------------
+             * Convert the typed‑array into a plain Uint8Array (no SharedArrayBuffer)
+             * and then wrap it in a Blob so that fetch accepts it.
+             * ------------------------------------------------------------------ */
+            const bodyBlob = new Blob(
+                [new Uint8Array(chunk)],   // <-- forces a normal Uint8Array
+                { type: 'application/octet-stream' }
+            );
+
             const response = await fetch(`/api/speedtest/${uniqueId}`, {
                 method: "POST",
-                body: chunk,
+                body: bodyBlob,
                 signal: abortControllerRef.current?.signal,
                 headers: {
                     "Content-Type": "application/octet-stream",
@@ -186,20 +195,28 @@ export default function Speedtest() {
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
                 console.error('Upload error:', errorData);
-                throw new Error(`Upload failed (${response.status}): ${errorData.error || 'Unknown error'}`);
+                throw new Error(
+                    `Upload failed (${response.status}): ${errorData.error || 'Unknown error'}`
+                );
             }
+
         } catch (error) {
-            if (retryCount < MAX_RETRIES && !abortControllerRef.current?.signal.aborted) {
+            if (
+                retryCount < MAX_RETRIES &&
+                !abortControllerRef.current?.signal.aborted
+            ) {
                 await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
                 return uploadChunk(chunkId, retryCount + 1);
             }
             throw error;
+
         } finally {
             if (chunk && chunkPool.current.length < UPLOAD_CHUNK_POOL_SIZE) {
                 chunkPool.current.push(chunk);
             }
         }
     }, []);
+
 
     const runTest = useCallback(async (
         isUpload: boolean,

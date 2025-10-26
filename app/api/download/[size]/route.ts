@@ -3,6 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 type Params = Promise<{ size: string }>;
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 const getSizeInBytes = (size: string): number => {
   switch (size.toLowerCase()) {
     case "10mb":
@@ -24,9 +27,12 @@ const generateFile = (size: number): Buffer => {
   return buffer;
 };
 
+// ---------------------------------------------------------------------------
+// Route handler
+// ---------------------------------------------------------------------------
 export async function GET(
   request: NextRequest,
-  segmentData: { params: Params }
+  segmentData: { params: Params },
 ) {
   const { size } = await segmentData.params;
 
@@ -40,7 +46,10 @@ export async function GET(
     const fileSizeInBytes = getSizeInBytes(size);
     const fileBuffer = generateFile(fileSizeInBytes);
 
-    const response = new NextResponse(fileBuffer, {
+    // 👉 Convert Buffer → Uint8Array so it matches BodyInit
+    const body = new Uint8Array(fileBuffer);
+
+    const response = new NextResponse(body, {
       headers: {
         "Content-Type": "application/octet-stream",
         "Content-Disposition": `attachment; filename=${size}.bin`,
@@ -53,7 +62,9 @@ export async function GET(
     console.error("Failed to generate file:", error);
     return new NextResponse(
       JSON.stringify({ error: "Internal server error" }),
-      { status: 500 }
+      {
+        status: 500,
+      },
     );
   }
 }

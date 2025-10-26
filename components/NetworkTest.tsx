@@ -2,7 +2,7 @@
 
 // React and Next.js imports
 import { useState, useCallback, useMemo, useEffect } from "react";
-import Link from "next/link";
+//import Link from "next/link";
 
 // Third-party imports
 import { useForm, Controller } from "react-hook-form";
@@ -201,7 +201,7 @@ export default function NetworkTest() {
 
     // Add new state for available commands
     const [availableCommands, setAvailableCommands] = useState<FormValues['command'][]>([
-        "ping", "host", "mtr", "livemtr", "livemtr6", "ping6", "mtr6"
+        "host", "ping", "mtr", "livemtr", "ping6", "mtr6", "livemtr6",
     ]);
 
     // Form setup needs to come before any hooks that use its methods
@@ -480,9 +480,9 @@ export default function NetworkTest() {
                 )}
                 <p className="p-2 space-y-2 space-x-2 text-sm hidden lg:block">
                     <span className="">Test Files:</span>
-                    <Link href={file1Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file1Size}</Link>
-                    <Link href={file2Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file2Size}</Link>
-                    <Link href={file3Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file3Size}</Link>
+                    <a href={file1Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file1Size}</a>
+                    <a href={file2Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file2Size}</a>
+                    <a href={file3Url} className="font-semibold hover:underline dark:text-blue-400 text-blue-600">{file3Size}</a>
                 </p>
             </CardHeader>
             <CardContent className="space-y-4">
