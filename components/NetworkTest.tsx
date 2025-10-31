@@ -189,7 +189,7 @@ export default function NetworkTest() {
     //const [clearError] = useState(() => () => setError(""));
 
     const ipv4Address = process.env.NEXT_PUBLIC_IPV4_ADDRESS || "127.0.0.1";
-    const ipv6Address = process.env.NEXT_PUBLIC_IPV6_ADDRESS || "::1";
+    const ipv6Address = process.env.NEXT_PUBLIC_IPV6_ADDRESS || false;
 
     // Get the file URLs from environment variables
     const file1Url = process.env.NEXT_PUBLIC_FILE1_URL || "/api/download/10mb";
@@ -199,10 +199,28 @@ export default function NetworkTest() {
     const file3Url = process.env.NEXT_PUBLIC_FILE3_URL || "/api/download/250mb";
     const file3Size = process.env.NEXT_PUBLIC_FILE3_SIZE || "250MB";
 
+    // Utility that turns an arbitrary string array into our command union
+    const makeCommandArray = (
+        ...cmds: string[]
+    ): FormValues['command'][] => {
+        // The cast is safe because we only call this with literals defined below.
+        return cmds as unknown as FormValues['command'][];
+    };
+
     // Add new state for available commands
-    const [availableCommands, setAvailableCommands] = useState<FormValues['command'][]>([
-        "host", "ping", "mtr", "livemtr", "ping6", "mtr6", "livemtr6",
-    ]);
+    const [availableCommands, setAvailableCommands] = useState<FormValues['command'][]>(() => {
+        const base: FormValues['command'][] = ['host'];          // always present
+
+        if (ipv4Address) {
+            base.push(...makeCommandArray('ping', 'mtr', 'livemtr'));
+        }
+
+        if (ipv6Address) {
+            base.push(...makeCommandArray('ping6', 'mtr6', 'livemtr6'));
+        }
+
+        return base;
+    });
 
     // Form setup needs to come before any hooks that use its methods
     const { control, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
@@ -224,32 +242,45 @@ export default function NetworkTest() {
     }, []);
 
     // Update commands based on input type with memoized function
-    const updateAvailableCommands = useCallback((input: string) => {
-        const type = detectInputType(input);
-        const baseCommands: FormValues['command'][] = ["host"];
-        let newCommands: FormValues['command'][];
+    const updateAvailableCommands = useCallback(
+        (input: string) => {
+            const type = detectInputType(input);
+            let newCommands: FormValues['command'][];
 
-        switch (type) {
-            case 'ipv4':
-                newCommands = [...baseCommands, "ping", "mtr", "livemtr",];
-                break;
-            case 'ipv6':
-                newCommands = [...baseCommands, "ping6", "mtr6", "livemtr6"];
-                break;
-            default:
-                newCommands = [
-                    ...baseCommands,
-                    "ping", "mtr", "livemtr", "ping6", "mtr6", "livemtr6",
-                ];
-        }
+            switch (type) {
+                case 'ipv4':
+                    newCommands = makeCommandArray('host', 'ping', 'mtr', 'livemtr');
+                    break;
+                case 'ipv6':
+                    // Only add IPv6 commands if an IPv6 test address is configured
+                    newCommands = ipv6Address
+                        ? makeCommandArray('host', 'ping6', 'mtr6', 'livemtr6')
+                        : ['host'];   // fall back to IPv4‑only list
+                    break;
+                default:
+                    newCommands = makeCommandArray(
+                        'host',
+                        'ping',
+                        'mtr',
+                        'livemtr',
+                        ...(ipv6Address ? ['ping6', 'mtr6', 'livemtr6'] : [])
+                    );
+            }
 
-        setAvailableCommands(newCommands);
+            setAvailableCommands(newCommands);
 
-        const currentCommand = watch('command');
-        if (!newCommands.includes(currentCommand)) {
-            setValue('command', type === 'ipv6' ? 'ping6' : 'ping');
-        }
-    }, [detectInputType, watch, setValue]);
+            const currentCommand = watch('command');
+            if (!newCommands.includes(currentCommand)) {
+                setValue(
+                    'command',
+                    type === 'ipv6' && ipv6Address ? 'ping6' : 'ping'
+                );
+            }
+        },
+        [detectInputType, watch, setValue, ipv6Address]
+    );
+
+
 
     // Single effect to handle input changes
     useEffect(() => {
