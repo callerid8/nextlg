@@ -239,8 +239,7 @@ export default function NetworkTest() {
             default:
                 newCommands = [
                     ...baseCommands,
-                    "mtr", "livemtr", "mtr6",
-                    "livemtr6", "ping", "ping6",
+                    "ping", "mtr", "livemtr", "ping6", "mtr6", "livemtr6",
                 ];
         }
 
