@@ -66,7 +66,7 @@ const formSchema = z.object({
             const domainRegex = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
             return ipv4Regex.test(host) || ipv6Regex.test(host) || domainRegex.test(host);
         }, "Invalid IP address or domain name"),
-    command: z.enum(["ping", "host", "mtr", "livemtr", "livemtr6", "ping6", "mtr6"]),
+    command: z.enum(["host", "ping", "mtr", "livemtr", "ping6", "mtr6", "livemtr6"]),
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -231,10 +231,10 @@ export default function NetworkTest() {
 
         switch (type) {
             case 'ipv4':
-                newCommands = [...baseCommands, "mtr", "livemtr", "ping"];
+                newCommands = [...baseCommands, "ping", "mtr", "livemtr",];
                 break;
             case 'ipv6':
-                newCommands = [...baseCommands, "mtr6", "livemtr6", "ping6"];
+                newCommands = [...baseCommands, "ping6", "mtr6", "livemtr6"];
                 break;
             default:
                 newCommands = [
