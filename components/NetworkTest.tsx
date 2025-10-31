@@ -199,28 +199,12 @@ export default function NetworkTest() {
     const file3Url = process.env.NEXT_PUBLIC_FILE3_URL || "/api/download/250mb";
     const file3Size = process.env.NEXT_PUBLIC_FILE3_SIZE || "250MB";
 
-    // Utility that turns an arbitrary string array into our command union
-    const makeCommandArray = (
-        ...cmds: string[]
-    ): FormValues['command'][] => {
-        // The cast is safe because we only call this with literals defined below.
-        return cmds as unknown as FormValues['command'][];
-    };
-
     // Add new state for available commands
-    const [availableCommands, setAvailableCommands] = useState<FormValues['command'][]>(() => {
-        const base: FormValues['command'][] = ['host'];          // always present
-
-        if (ipv4Address) {
-            base.push(...makeCommandArray('ping', 'mtr', 'livemtr'));
-        }
-
-        if (ipv6Address) {
-            base.push(...makeCommandArray('ping6', 'mtr6', 'livemtr6'));
-        }
-
-        return base;
-    });
+    const [availableCommands, setAvailableCommands] = useState<FormValues['command'][]>(
+        ipv6Address
+            ? ["host", "ping", "mtr", "livemtr", "ping6", "mtr6", "livemtr6"]
+            : ["host", "ping", "mtr", "livemtr"]
+    );
 
     // Form setup needs to come before any hooks that use its methods
     const { control, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
@@ -245,42 +229,32 @@ export default function NetworkTest() {
     const updateAvailableCommands = useCallback(
         (input: string) => {
             const type = detectInputType(input);
+            // Build the command list for this input.
             let newCommands: FormValues['command'][];
 
-            switch (type) {
-                case 'ipv4':
-                    newCommands = makeCommandArray('host', 'ping', 'mtr', 'livemtr');
-                    break;
-                case 'ipv6':
-                    // Only add IPv6 commands if an IPv6 test address is configured
-                    newCommands = ipv6Address
-                        ? makeCommandArray('host', 'ping6', 'mtr6', 'livemtr6')
-                        : ['host'];   // fall back to IPv4‑only list
-                    break;
-                default:
-                    newCommands = makeCommandArray(
-                        'host',
-                        'ping',
-                        'mtr',
-                        'livemtr',
-                        ...(ipv6Address ? ['ping6', 'mtr6', 'livemtr6'] : [])
-                    );
+            if (type === "ipv4") {
+                newCommands = ["host", "ping", "mtr", "livemtr"];
+            } else if (type === "ipv6" && ipv6Address) {
+                // Only expose IPv6 commands when we actually have an IPv6 test host.
+                newCommands = ["host", "ping6", "mtr6", "livemtr6"];
+            } else {
+                // Either a hostname or an IPv6 address but no test IPv6 → use the IPv4 set
+                newCommands = ["host", "ping", "mtr", "livemtr"];
             }
 
             setAvailableCommands(newCommands);
 
-            const currentCommand = watch('command');
+            // If the current command is no longer available, switch to a sensible default.
+            const currentCommand = watch("command");
             if (!newCommands.includes(currentCommand)) {
                 setValue(
-                    'command',
-                    type === 'ipv6' && ipv6Address ? 'ping6' : 'ping'
+                    "command",
+                    type === "ipv6" && ipv6Address ? "ping6" : "ping"
                 );
             }
         },
-        [detectInputType, watch, setValue, ipv6Address]
+        [detectInputType, ipv6Address, watch, setValue]
     );
-
-
 
     // Single effect to handle input changes
     useEffect(() => {
