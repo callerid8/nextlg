@@ -588,7 +588,7 @@ export default function NetworkTest() {
                         <Textarea
                             value={output}
                             readOnly
-                            className="h-72 min-w-3xl resize-none overflow-x-auto font-mono text-xs md:text-sm"
+                            className="h-72 resize-none overflow-x-auto font-mono text-xs md:text-sm"
                             aria-label="Command output"
                         />
                     </div>
