@@ -4,7 +4,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 Check the .env.local file for configuration options.
 
-If running behind nginx, make sure to add the following to your configuration for the upload speedtest:
+If running behind nginx, make sure to add the following to your nginx configuration for the upload speedtest:
 
 ```
 client_max_body_size 20M
